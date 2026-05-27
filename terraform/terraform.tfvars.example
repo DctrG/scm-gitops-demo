@@ -1,0 +1,13 @@
+# Palo Alto Networks Strata Cloud Manager Credentials
+# Copy this file to terraform.tfvars and fill in your actual credentials
+# DO NOT commit terraform.tfvars to git - it contains sensitive information
+
+panw_client_id     = "your-client-id"
+panw_client_secret = "your-client-secret"
+panw_tsg_id        = "your-tsg-id"
+
+# Path to customers YAML file (optional, defaults to customers.yaml)
+# customers_file = "customers.yaml"
+
+
+

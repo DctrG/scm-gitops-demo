@@ -1,0 +1,62 @@
+name: Deploy VPN (Python)
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'customers-to-add.yaml'
+      - 'customers-to-delete.yaml'
+      - 'deploy-multi-vpn.py'
+      - 'requirements.txt'
+      - '.github/workflows/python-vpn.yml'
+
+  push:
+    branches:
+      - main
+    paths:
+      - 'customers-to-add.yaml'
+      - 'customers-to-delete.yaml'
+      - 'deploy-multi-vpn.py'
+      - 'requirements.txt'
+      - '.github/workflows/python-vpn.yml'
+
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Python VPN Automation
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+
+      - name: Validate customer YAML
+        run: |
+          python - <<'PY'
+          import yaml
+
+          for filename in ("customers-to-add.yaml", "customers-to-delete.yaml"):
+              with open(filename, "r", encoding="utf-8") as fh:
+                  yaml.safe_load(fh)
+              print(f"Validated {filename}")
+          PY
+
+      - name: Deploy Python-managed VPNs
+        if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+        env:
+          PANW_CLIENT_ID: ${{ secrets.PANW_CLIENT_ID }}
+          PANW_CLIENT_SECRET: ${{ secrets.PANW_CLIENT_SECRET }}
+          PANW_TSG_ID: ${{ secrets.PANW_TSG_ID }}
+        run: python deploy-multi-vpn.py
