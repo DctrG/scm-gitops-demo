@@ -3,7 +3,7 @@ name: Deploy VPN (Terraform)
 on:
   pull_request:
     branches:
-      - main
+      - dev
     paths:
       - 'customers-terraform.yaml'
       - 'terraform/**'
@@ -11,7 +11,7 @@ on:
 
   push:
     branches:
-      - main
+      - dev
     paths:
       - 'customers-terraform.yaml'
       - 'terraform/**'
@@ -38,13 +38,10 @@ jobs:
       actions: read
     env:
       TF_PLUGIN_CACHE_DIR: /tmp/terraform-plugin-cache
-      SCM_CLIENT_ID: ${{ secrets.PANW_CLIENT_ID }}
-      SCM_CLIENT_SECRET: ${{ secrets.PANW_CLIENT_SECRET }}
-      SCM_SCOPE: tsg_id:${{ secrets.PANW_TSG_ID }}
-      SCM_TSG_ID: ${{ secrets.PANW_TSG_ID }}
-      TF_VAR_panw_client_id: ${{ secrets.PANW_CLIENT_ID }}
-      TF_VAR_panw_client_secret: ${{ secrets.PANW_CLIENT_SECRET }}
-      TF_VAR_panw_tsg_id: ${{ secrets.PANW_TSG_ID }}
+      PANOS_HOSTNAME: ${{ secrets.PANORAMA_HOST }}
+      PANOS_API_KEY: ${{ secrets.PANORAMA_API_KEY }}
+      TF_VAR_panorama_hostname: ${{ secrets.PANORAMA_HOST }}
+      TF_VAR_panorama_api_key: ${{ secrets.PANORAMA_API_KEY }}
 
     steps:
       - name: Checkout code
@@ -97,4 +94,3 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.terraform_action == 'destroy' }}
         working-directory: terraform
         run: terraform destroy -auto-approve
-

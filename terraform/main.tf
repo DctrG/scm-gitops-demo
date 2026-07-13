@@ -1,117 +1,185 @@
-# Root folder
-resource "scm_folder" "root_folder" {
-  name        = local.global_config.root_folder
-  parent      = "ngfw-shared"
-  description = "Root folder for Terraform-managed PANW customer VPNs"
+# Shared Panorama configuration for all Terraform-managed customers:
+# one template (network config) and one parent device group (policy config).
+
+resource "panos_template" "template" {
+  location = {
+    panorama = {}
+  }
+
+  name         = local.global_config.template
+  description  = "Template for Terraform-managed PANW customer VPNs"
+  default_vsys = "vsys1"
 }
 
-resource "null_resource" "root_folder_propagation" {
-  depends_on = [scm_folder.root_folder]
+resource "panos_device_group" "parent" {
+  location = {
+    panorama = {}
+  }
+
+  name        = local.global_config.parent_device_group
+  description = "Parent device group for Terraform-managed PANW customer VPNs"
+  templates   = [panos_template.template.name]
+}
+
+# Physical interface used as the IKE gateway local interface
+resource "panos_ethernet_interface" "local_interface" {
+  location = {
+    template = {
+      name = panos_template.template.name
+      vsys = "vsys1"
+    }
+  }
+
+  name   = local.global_config.local_interface
+  layer3 = {}
+}
+
+resource "panos_virtual_router" "vr" {
+  location = {
+    template = {
+      name = panos_template.template.name
+    }
+  }
+
+  name = local.global_config.virtual_router
+}
+
+# Interface memberships are managed with panos_virtual_router_interface
+# (here and in the customer module) so customers can attach their tunnel
+# interfaces without fighting over the virtual router resource.
+resource "panos_virtual_router_interface" "local_interface" {
+  location = {
+    template = {
+      name = panos_template.template.name
+    }
+  }
+
+  virtual_router = panos_virtual_router.vr.name
+  interface      = panos_ethernet_interface.local_interface.name
+}
+
+# Shared crypto profiles
+resource "panos_ike_crypto_profile" "ike_profile" {
+  location = {
+    template = {
+      name = panos_template.template.name
+    }
+  }
+
+  name       = local.global_config.ike_profile
+  hash       = ["sha256"]
+  dh_group   = ["group14"]
+  encryption = ["aes-256-cbc"]
+
+  lifetime = {
+    hours = 8
+  }
+}
+
+resource "panos_ipsec_crypto_profile" "ipsec_profile" {
+  location = {
+    template = {
+      name = panos_template.template.name
+    }
+  }
+
+  name     = local.global_config.ipsec_profile
+  dh_group = "group14"
+
+  esp = {
+    encryption     = ["aes-256-cbc"]
+    authentication = ["sha256"]
+  }
+
+  lifetime = {
+    hours = 1
+  }
+}
+
+# Per-customer device group, tunnel, zone, IKE gateway, IPsec tunnel and policy
+module "customers" {
+  source = "./modules/customer"
+
+  for_each = {
+    for idx, customer in local.customers : customer.device_group => customer
+  }
+
+  customer_config = each.value
+  global_config   = local.global_config
+
+  depends_on = [
+    panos_template.template,
+    panos_device_group.parent,
+    panos_ethernet_interface.local_interface,
+    panos_virtual_router.vr,
+    panos_ike_crypto_profile.ike_profile,
+    panos_ipsec_crypto_profile.ipsec_profile,
+  ]
+}
+
+# Commit the candidate configuration to Panorama after every change
+resource "null_resource" "panorama_commit" {
+  triggers = {
+    config_hash = sha256(file(var.customers_file))
+  }
 
   provisioner "local-exec" {
     command = <<-EOT
       set -e
 
-      CLIENT_ID="${var.panw_client_id}"
-      CLIENT_SECRET="${var.panw_client_secret}"
-      TSG_ID="${var.panw_tsg_id}"
+      HOST="${var.panorama_hostname}"
+      KEY="${var.panorama_api_key}"
+      if [ -z "$HOST" ]; then HOST="$PANOS_HOSTNAME"; fi
+      if [ -z "$KEY" ]; then KEY="$PANOS_API_KEY"; fi
 
-      if [ -z "$CLIENT_ID" ]; then
-        CLIENT_ID="$SCM_CLIENT_ID"
-      fi
-      if [ -z "$CLIENT_SECRET" ]; then
-        CLIENT_SECRET="$SCM_CLIENT_SECRET"
-      fi
-      if [ -z "$TSG_ID" ]; then
-        TSG_ID="$SCM_TSG_ID"
-      fi
-
-      if [ -z "$CLIENT_ID" ] || [ -z "$CLIENT_SECRET" ] || [ -z "$TSG_ID" ]; then
-        echo "Error: Missing credentials (panw_client_id, panw_client_secret, or panw_tsg_id)"
+      if [ -z "$HOST" ] || [ -z "$KEY" ]; then
+        echo "Error: Missing Panorama credentials (panorama_hostname/panorama_api_key or PANOS_HOSTNAME/PANOS_API_KEY)"
         exit 1
       fi
 
-      TOKEN=$(curl -s -X POST "https://auth.apps.paloaltonetworks.com/oauth2/access_token" \
-        -u "$CLIENT_ID:$CLIENT_SECRET" \
-        -H "Content-Type: application/x-www-form-urlencoded" \
-        --data-urlencode "grant_type=client_credentials" \
-        --data-urlencode "scope=tsg_id:$TSG_ID" | \
-        python3 -c "import sys, json; print(json.load(sys.stdin).get('access_token', ''))")
+      echo "Committing candidate configuration to Panorama..."
+      RESPONSE=$(curl -sk -G "https://$HOST/api/" \
+        --data-urlencode "type=commit" \
+        --data-urlencode "cmd=<commit><description>Terraform GitOps VPN automation</description></commit>" \
+        -H "X-PAN-KEY: $KEY")
 
-      if [ -z "$TOKEN" ]; then
-        echo "Error: Failed to get authentication token"
-        exit 1
-      fi
-
-      FOLDER_NAME="${scm_folder.root_folder.name}"
-      API_URL="https://api.strata.paloaltonetworks.com/config/setup/v1/folders"
-      MAX_ATTEMPTS=30
-      ATTEMPT=0
-      SLEEP_INTERVAL=2
-
-      echo "Polling for root folder '$FOLDER_NAME' to be available..."
-
-      while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-        ATTEMPT=$((ATTEMPT + 1))
-        RESPONSE=$(curl -s -X GET "$API_URL" \
-          -H "Authorization: Bearer $TOKEN" \
-          -H "Accept: application/json")
-
-        FOLDER_EXISTS=$(echo "$RESPONSE" | python3 -c "
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    for folder in data.get('data', []):
-        if folder.get('name') == '$FOLDER_NAME':
-            print('true')
-            sys.exit(0)
-    print('false')
-except Exception:
-    print('false')
-")
-
-        if [ "$FOLDER_EXISTS" = "true" ]; then
-          echo "✓ Root folder '$FOLDER_NAME' is now available (attempt $ATTEMPT/$MAX_ATTEMPTS)"
+      JOB_ID=$(echo "$RESPONSE" | sed -n 's:.*<job>\(.*\)</job>.*:\1:p')
+      if [ -z "$JOB_ID" ]; then
+        if echo "$RESPONSE" | grep -q "no changes"; then
+          echo "No changes to commit."
           exit 0
         fi
+        echo "Error: Commit did not start a job. Response: $RESPONSE"
+        exit 1
+      fi
 
-        if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
-          echo "  Root folder not yet available, waiting $SLEEP_INTERVAL seconds... (attempt $ATTEMPT/$MAX_ATTEMPTS)"
-          sleep $SLEEP_INTERVAL
+      echo "Commit job $JOB_ID started, waiting for completion..."
+      ATTEMPT=0
+      while [ $ATTEMPT -lt 90 ]; do
+        ATTEMPT=$((ATTEMPT + 1))
+        sleep 5
+        JOB=$(curl -sk -G "https://$HOST/api/" \
+          --data-urlencode "type=op" \
+          --data-urlencode "cmd=<show><jobs><id>$JOB_ID</id></jobs></show>" \
+          -H "X-PAN-KEY: $KEY")
+        STATUS=$(echo "$JOB" | sed -n 's:.*<status>\(.*\)</status>.*:\1:p')
+        if [ "$STATUS" = "FIN" ]; then
+          RESULT=$(echo "$JOB" | sed -n 's:.*<result>\(.*\)</result>.*:\1:p' | head -1)
+          if [ "$RESULT" = "OK" ]; then
+            echo "Commit job $JOB_ID completed successfully."
+            exit 0
+          fi
+          echo "Error: Commit job $JOB_ID finished with result $RESULT"
+          echo "$JOB"
+          exit 1
         fi
+        echo "  Commit in progress... (attempt $ATTEMPT/90)"
       done
 
-      echo "Error: Root folder '$FOLDER_NAME' did not become available after $MAX_ATTEMPTS attempts"
+      echo "Error: Commit job $JOB_ID did not finish in time"
       exit 1
     EOT
   }
 
-  triggers = {
-    folder_id = scm_folder.root_folder.id
-  }
+  depends_on = [module.customers]
 }
-
-# Note: Physical interfaces like ethernet1/1 are device-level hardware interfaces
-# that already exist on the firewall. They cannot be created via Terraform.
-# We reference them by name - they must exist at the device/parent folder level.
-# The interface name format should be "$ethernet1/1" (with $ prefix) for SCM API.
-
-# Customer folders and resources
-module "customers" {
-  source = "./modules/customer"
-
-  for_each = {
-    for idx, customer in local.customers : customer.folder_name => customer
-  }
-
-  customer_config = each.value
-  global_config   = local.global_config
-  root_folder_id  = scm_folder.root_folder.name # Use folder name instead of ID
-  # Credentials: prefer environment variables, fallback to variables
-  scm_client_id     = var.panw_client_id != "" ? var.panw_client_id : ""
-  scm_client_secret = var.panw_client_secret != "" ? var.panw_client_secret : ""
-  scm_tsg_id        = var.panw_tsg_id != "" ? var.panw_tsg_id : ""
-
-  depends_on = [null_resource.root_folder_propagation]
-}
-

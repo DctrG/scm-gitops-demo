@@ -1,14 +1,19 @@
-# Terraform Deployment for PANW Customer VPNs
+# Terraform Deployment for PANW Customer VPNs (Panorama)
 
-This Terraform configuration deploys IPsec VPN connections for multiple customers to Palo Alto Networks Strata Cloud Manager using the [PaloAltoNetworks/scm](https://registry.terraform.io/providers/PaloAltoNetworks/scm/latest/docs) provider.
+This Terraform configuration deploys IPsec VPN connections for multiple customers to Palo Alto Networks Panorama using the [PaloAltoNetworks/panos](https://registry.terraform.io/providers/PaloAltoNetworks/panos/latest/docs) provider (v2).
+
+## Layout on Panorama
+
+- One template (`PANW-Terraform-Template`) holds shared network config: the local ethernet interface, virtual router, IKE/IPsec crypto profiles, plus per-customer tunnel interfaces, zones, IKE gateways and IPsec tunnels.
+- One parent device group (`PANW-Terraform-Global`) with one nested device group per customer holding address objects and the security rule.
+- A commit to Panorama runs automatically at the end of each apply.
 
 ## Prerequisites
 
-1. **Terraform** >= 1.0 installed
-2. **Palo Alto Networks API credentials**:
-   - Client ID
-   - Client Secret
-   - Tenant Service Group (TSG) ID
+1. **Terraform** >= 1.8 installed
+2. **Panorama credentials**:
+   - Hostname or IP address
+   - XML API key
 
 ## Setup
 
@@ -19,15 +24,13 @@ This Terraform configuration deploys IPsec VPN connections for multiple customer
    ```
 
 2. **Configure credentials** (choose one method):
-   
+
    **Option A: Environment variables** (recommended)
    ```bash
-   export SCM_CLIENT_ID="your-client-id"
-   export SCM_CLIENT_SECRET="your-client-secret"
-   export SCM_SCOPE="tsg_id:your-tsg-id"
-   export SCM_TSG_ID="your-tsg-id" # used by the folder propagation poller
+   export PANOS_HOSTNAME="panorama.example.com"
+   export PANOS_API_KEY="your-panorama-api-key"
    ```
-   
+
    **Option B: terraform.tfvars file** (create this file, don't commit it)
    ```bash
    cp terraform.tfvars.example terraform.tfvars
@@ -78,12 +81,11 @@ Simply remove the customer from `customers-terraform.yaml` and run `terraform ap
 ```
 terraform/
 ├── ../customers-terraform.yaml # Single source of truth for Terraform customers
-├── versions.tf            # Terraform and provider versions
+├── versions.tf            # Terraform and provider versions (HCP Terraform cloud block)
 ├── provider.tf            # Provider configuration
 ├── variables.tf           # Input variables
 ├── data.tf                # Data sources (YAML loading)
-├── main.tf                # Main resources
-├── outputs.tf             # Output values
+├── main.tf                # Shared template, device group, profiles, commit
 └── modules/
     └── customer/
         ├── variables.tf   # Customer module variables
@@ -92,14 +94,7 @@ terraform/
 
 ## Notes
 
-- Uses the official [PaloAltoNetworks/scm](https://registry.terraform.io/providers/PaloAltoNetworks/scm/latest/docs) provider for Strata Cloud Manager
-- Terraform state is stored locally by default (consider using remote state for team collaboration)
-- The provider supports OAuth2 Client Credentials authentication
-- All resources are scoped to folders for proper organization
-
-## Provider Documentation
-
-For detailed resource documentation, see:
-- [SCM Provider Documentation](https://registry.terraform.io/providers/PaloAltoNetworks/scm/latest/docs)
-- Resource types: `scm_folder`, `scm_zone`, `scm_tunnel_interface`, `scm_ike_crypto_profile`, `scm_ipsec_crypto_profile`, `scm_ike_gateway`, `scm_ipsec_tunnel`, `scm_address_object`, `scm_security_rule`
-
+- Uses the official [PaloAltoNetworks/panos](https://registry.terraform.io/providers/PaloAltoNetworks/panos/latest/docs) provider (v2, location-based resources)
+- Terraform state is stored in HCP Terraform (see `versions.tf`); the workspace must use **Local** execution mode
+- Authentication uses the Panorama XML API key
+- Resource types: `panos_template`, `panos_device_group`, `panos_device_group_parent`, `panos_tunnel_interface`, `panos_zone`, `panos_ike_crypto_profile`, `panos_ipsec_crypto_profile`, `panos_ike_gateway`, `panos_ipsec_tunnel`, `panos_address`, `panos_security_policy`

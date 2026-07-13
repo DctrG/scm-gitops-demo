@@ -1,41 +1,43 @@
-# PANW Customer VPN Configuration
-# Single source of truth for all customer VPN configurations
+# PANW Customer VPN Configuration (Panorama / Terraform)
+# Single source of truth for all Terraform-managed customer VPN configurations
 # Terraform will create resources for customers listed here
 
 # Global settings (applied to all customers)
 global:
-  root_folder: "PANW Terraform Global"
+  template: "PANW-Terraform-Template"
+  parent_device_group: "PANW-Terraform-Global"
   panw_network: "10.10.0.0/16"
   panw_network_object: "PANW-Terraform-net"
   to_zone: "trust"
   ike_profile: "PANW-Terraform-IKEv2-Standard"
   ipsec_profile: "PANW-Terraform-IPsec-Standard"
-  local_interface: "$ethernet1-1"  # Physical interface (created at customer folder level, format: $ethernet1-1)
+  local_interface: "ethernet1/1"
+  virtual_router: "default"
 
 # Customer configurations
 # Only customers listed here will be deployed
 # Removing a customer from this list will delete it (via Terraform destroy)
 # Set enabled: false to disable without deleting
 customers:
-  # - customer_name: "Customer-AB"
-  #   folder_name: "PANW-Terraform-Customer-AB"
-  #   customer_network: "10.24.0.0/16"
-  #   customer_network_object: "customer-AB-Net"
-  #   peer_ip: "203.0.113.20"
-  #   psk: "secret-key-ab-67890"
-  #   tunnel_number: 11
-  #   zone_name: "Customer-AB-Zone"
-  #   ike_gateway_name: "Customer-AB-IKE-GW"
-  #   ipsec_tunnel_name: "Customer-AB-Tunnel"
-  #   security_rule_name: "allow-customer-ab-to-panw-terraform"
-  #   enabled: true
+  - customer_name: "Customer-AB"
+    device_group: "PANW-Terraform-Customer-AB"
+    customer_network: "10.24.0.0/16"
+    customer_network_object: "customer-AB-Net"
+    peer_ip: "203.0.113.20"
+    psk: "replace-with-real-psk"
+    tunnel_number: 11
+    zone_name: "Customer-AB-Zone"
+    ike_gateway_name: "Customer-AB-IKE-GW"
+    ipsec_tunnel_name: "Customer-AB-Tunnel"
+    security_rule_name: "allow-customer-ab-to-panw-terraform"
+    enabled: true
 
   # - customer_name: "Customer-CD"
-  #   folder_name: "PANW-Terraform-Customer-CD"
+  #   device_group: "PANW-Terraform-Customer-CD"
   #   customer_network: "10.25.0.0/16"
   #   customer_network_object: "customer-CD-Net"
   #   peer_ip: "203.0.113.30"
-  #   psk: "secret-key-cd-11111"
+  #   psk: "replace-with-real-psk"
   #   tunnel_number: 12
   #   zone_name: "Customer-CD-Zone"
   #   ike_gateway_name: "Customer-CD-IKE-GW"
@@ -44,11 +46,11 @@ customers:
   #   enabled: true
 
   # - customer_name: "Customer-EF"
-  #   folder_name: "PANW-Terraform-Customer-EF"
+  #   device_group: "PANW-Terraform-Customer-EF"
   #   customer_network: "10.26.0.0/16"
   #   customer_network_object: "customer-EF-Net"
   #   peer_ip: "203.0.113.40"
-  #   psk: "secret-key-ef-22222"
+  #   psk: "replace-with-real-psk"
   #   tunnel_number: 13
   #   zone_name: "Customer-EF-Zone"
   #   ike_gateway_name: "Customer-EF-IKE-GW"
@@ -57,79 +59,14 @@ customers:
   #   enabled: true
 
   # - customer_name: "Customer-GH"
-  #   folder_name: "PANW-Terraform-Customer-GH"
+  #   device_group: "PANW-Terraform-Customer-GH"
   #   customer_network: "10.27.0.0/16"
   #   customer_network_object: "customer-GH-Net"
   #   peer_ip: "203.0.113.50"
-  #   psk: "secret-key-gh-33333"
+  #   psk: "replace-with-real-psk"
   #   tunnel_number: 14
   #   zone_name: "Customer-GH-Zone"
   #   ike_gateway_name: "Customer-GH-IKE-GW"
   #   ipsec_tunnel_name: "Customer-GH-Tunnel"
   #   security_rule_name: "allow-customer-gh-to-panw-terraform"
-  #   enabled: true
-
-  # - customer_name: "Customer-IJ"
-  #   folder_name: "PANW-Terraform-Customer-IJ"
-  #   customer_network: "10.28.0.0/16"
-  #   customer_network_object: "customer-IJ-Net"
-  #   peer_ip: "203.0.113.60"
-  #   psk: "secret-key-ij-44444"
-  #   tunnel_number: 15
-  #   zone_name: "Customer-IJ-Zone"
-  #   ike_gateway_name: "Customer-IJ-IKE-GW"
-  #   ipsec_tunnel_name: "Customer-IJ-Tunnel"
-  #   security_rule_name: "allow-customer-ij-to-panw-terraform"
-  #   enabled: true
-
-  # - customer_name: "Customer-KL"
-  #   folder_name: "PANW-Terraform-Customer-KL"
-  #   customer_network: "10.29.0.0/16"
-  #   customer_network_object: "customer-KL-Net"
-  #   peer_ip: "203.0.113.70"
-  #   psk: "secret-key-kl-55555"
-  #   tunnel_number: 16
-  #   zone_name: "Customer-KL-Zone"
-  #   ike_gateway_name: "Customer-KL-IKE-GW"
-  #   ipsec_tunnel_name: "Customer-KL-Tunnel"
-  #   security_rule_name: "allow-customer-kl-to-panw-terraform"
-  #   enabled: true
-
-  # - customer_name: "Customer-MN"
-  #   folder_name: "PANW-Terraform-Customer-MN"
-  #   customer_network: "10.30.0.0/16"
-  #   customer_network_object: "customer-MN-Net"
-  #   peer_ip: "203.0.113.80"
-  #   psk: "secret-key-mn-66666"
-  #   tunnel_number: 17
-  #   zone_name: "Customer-MN-Zone"
-  #   ike_gateway_name: "Customer-MN-IKE-GW"
-  #   ipsec_tunnel_name: "Customer-MN-Tunnel"
-  #   security_rule_name: "allow-customer-mn-to-panw-terraform"
-  #   enabled: true
-
-  # - customer_name: "Customer-OP"
-  #   folder_name: "PANW-Terraform-Customer-OP"
-  #   customer_network: "10.31.0.0/16"
-  #   customer_network_object: "customer-OP-Net"
-  #   peer_ip: "203.0.113.90"
-  #   psk: "secret-key-op-77777"
-  #   tunnel_number: 18
-  #   zone_name: "Customer-OP-Zone"
-  #   ike_gateway_name: "Customer-OP-IKE-GW"
-  #   ipsec_tunnel_name: "Customer-OP-Tunnel"
-  #   security_rule_name: "allow-customer-op-to-panw-terraform"
-  #   enabled: true
-
-  # - customer_name: "Customer-QR"
-  #   folder_name: "PANW-Terraform-Customer-QR"
-  #   customer_network: "10.32.0.0/16"
-  #   customer_network_object: "customer-QR-Net"
-  #   peer_ip: "203.0.113.100"
-  #   psk: "secret-key-qr-88888"
-  #   tunnel_number: 19
-  #   zone_name: "Customer-QR-Zone"
-  #   ike_gateway_name: "Customer-QR-IKE-GW"
-  #   ipsec_tunnel_name: "Customer-QR-Tunnel"
-  #   security_rule_name: "allow-customer-qr-to-panw-terraform"
   #   enabled: true

@@ -1,13 +1,13 @@
-# PANW Customer VPN - Folders to Delete
-# This file lists customer folders that should be deleted from Strata Cloud Manager
-# 
-# Format: List of folder names under "PANW Python Global" to be deleted
-# The script will delete these folders and all their contents
+# PANW Customer VPN - Customers to Delete (Panorama)
+# This file lists customer device groups that should be deleted from Panorama
+#
+# Format: List of device group names under "PANW-Python-Global" to be deleted
+# The script deletes each device group plus its template artifacts
+# (zone, tunnel interface, IKE gateway, IPsec tunnel)
 
-folders_to_delete:
+device_groups_to_delete:
   # Example (commented out):
   # - "PANW-Python-Customer-AB"
   # - "PANW-Python-Customer-CD"
   # - "PANW-Python-Customer-EF"
   # - "PANW-Python-Customer-GH"
-

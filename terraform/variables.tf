@@ -1,19 +1,11 @@
-variable "panw_client_id" {
-  description = "Palo Alto Networks OAuth2 Client ID (or use SCM_CLIENT_ID env var)"
+variable "panorama_hostname" {
+  description = "Panorama hostname or IP address (or use PANOS_HOSTNAME env var)"
   type        = string
-  sensitive   = true
   default     = ""
 }
 
-variable "panw_client_secret" {
-  description = "Palo Alto Networks OAuth2 Client Secret (or use SCM_CLIENT_SECRET env var)"
-  type        = string
-  sensitive   = true
-  default     = ""
-}
-
-variable "panw_tsg_id" {
-  description = "Palo Alto Networks Tenant Service Group ID (or use SCM_TSG_ID env var)"
+variable "panorama_api_key" {
+  description = "Panorama XML API key (or use PANOS_API_KEY env var)"
   type        = string
   sensitive   = true
   default     = ""

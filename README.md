@@ -1,249 +1,133 @@
-# PANW GitOps VPN Automation
+# PANW GitOps VPN Automation (Panorama)
 
-This repository shows two GitOps-style automation paths for managing PANW customer VPN configuration in Strata Cloud Manager:
+This branch contains two automation paths for managing PANW customer VPN configuration in **Panorama** (PAN-OS XML API), instead of Strata Cloud Manager which is used on `main`:
 
-- Python automation driven by `customers-to-add.yaml` and `customers-to-delete.yaml`.
-- Terraform automation driven by `customers-terraform.yaml`.
+- Python automation for customers defined in `customers-to-add.yaml` and `customers-to-delete.yaml`.
+- Terraform automation for customers defined in `customers-terraform.yaml`.
 
-Both workflows can live in the same repository. The file you change determines which GitHub Actions workflow runs.
-
-## Repository Layout
-
-```text
-.
-├── customers-to-add.yaml          # Python-managed customer add/update list
-├── customers-to-delete.yaml       # Python-managed customer delete list
-├── customers-terraform.yaml       # Terraform-managed desired state
-├── deploy-multi-vpn.py            # Python deployment script
-├── requirements.txt               # Python dependencies
-├── .github/workflows/
-│   ├── python-vpn.yml             # Python workflow
-│   └── deploy-vpn.yml             # Terraform workflow
-└── terraform/                     # Terraform implementation
-```
+Both workflows live in the same branch. The file you change determines which workflow runs.
 
 ## Ownership Model
 
-Keep Python-managed and Terraform-managed resources separate so the two tools do not manage or delete the same SCM objects.
+Keep Python-managed and Terraform-managed resources separate so the two tools do not try to manage or delete the same Panorama objects. Each path owns one template (network config) and one parent device group (policies) with nested per-customer device groups.
 
-| Automation | Root folder | Customer folder naming |
-| --- | --- | --- |
-| Python | `PANW Python Global` | `PANW-Python-Customer-*` |
-| Terraform | `PANW Terraform Global` | `PANW-Terraform-Customer-*` |
+| Automation | Template | Parent device group | Customer device groups |
+| --- | --- | --- | --- |
+| Python | `PANW-Python-Template` | `PANW-Python-Global` | `PANW-Python-Customer-*` |
+| Terraform | `PANW-Terraform-Template` | `PANW-Terraform-Global` | `PANW-Terraform-Customer-*` |
+
+Per customer, the automation creates:
+
+- In the template: a tunnel interface, a zone, an IKE gateway and an IPsec tunnel (shared: ethernet interface, virtual router, IKE/IPsec crypto profiles).
+- In the customer device group: address objects and a security rule.
+
+Both paths commit the candidate configuration to Panorama at the end of a run.
 
 Do not put the same customer under both automation paths unless you intentionally want two separate test deployments.
 
-## 1. Clone The Repository
+## Setup
+
+### 1. Clone and branch
 
 ```bash
-git clone https://github.com/DctrG/scm-gitops-demo.git
+git clone git@github.com:DctrG/scm-gitops-demo.git
 cd scm-gitops-demo
+git checkout dev
 ```
 
-Create a working branch for changes:
+### 2. Panorama API key
+
+Generate an API key for an admin account:
 
 ```bash
-git checkout -b vpn/customer-change
+curl -sk "https://<panorama-host>/api/?type=keygen&user=<user>&password=<password>"
 ```
 
-## 2. Configure Strata Cloud Manager Credentials
+### 3. GitHub Secrets
 
-Create or identify an SCM service account with permissions to manage the folders and VPN objects used by this repository.
-
-You need:
+GitHub Actions needs these repository secrets (Settings → Secrets and variables → Actions):
 
 ```text
-PANW_CLIENT_ID
-PANW_CLIENT_SECRET
-PANW_TSG_ID
+PANORAMA_HOST              Panorama hostname or IP
+PANORAMA_API_KEY           Panorama XML API key
+TF_TOKEN_APP_TERRAFORM_IO  HCP Terraform user/team API token (Terraform workflow only)
 ```
 
-`PANW_TSG_ID` should be the raw TSG ID only, not `tsg_id:<id>`.
+### 4. HCP Terraform workspace
 
-Do not commit these values to Git.
+The Terraform state lives in HCP Terraform (see `terraform/versions.tf`, workspace `panw-gitops-panorama` in org `panw-gitops`):
 
-## 3. Configure HCP Terraform
+1. Create the workspace (CLI-driven workflow).
+2. Set the execution mode to **Local**: `Workspace → Settings → General → Execution Mode → Local`. With local execution, GitHub Actions runs `terraform plan/apply` while HCP Terraform stores the shared state and handles locking.
 
-Terraform state is stored in HCP Terraform. The workspace is configured in `terraform/versions.tf`:
+## Python Workflow
 
-```hcl
-cloud {
-  organization = "panw-gitops"
+Python-owned customers are configured with:
 
-  workspaces {
-    name = "panw-gitops-dev"
-  }
-}
-```
-
-If you use a different organization or workspace, update `terraform/versions.tf`.
-
-In HCP Terraform:
-
-1. Create or select the organization.
-2. Create a workspace, for example `panw-gitops-dev`.
-3. Set the workspace execution mode to **Local**:
-
-```text
-Workspace -> Settings -> General -> Execution Mode -> Local
-```
-
-With Local execution, GitHub Actions runs `terraform plan/apply`, while HCP Terraform stores remote state and handles locking.
-
-Optional workspace variables for local/manual Terraform use:
-
-```text
-panw_client_id
-panw_client_secret
-panw_tsg_id
-```
-
-Set them as Terraform variables and mark them sensitive.
-
-## 4. Configure GitHub Secrets
-
-In GitHub, go to:
-
-```text
-Repository -> Settings -> Secrets and variables -> Actions -> New repository secret
-```
-
-Add these repository secrets:
-
-```text
-PANW_CLIENT_ID
-PANW_CLIENT_SECRET
-PANW_TSG_ID
-TF_TOKEN_APP_TERRAFORM_IO
-```
-
-The `PANW_*` secrets authenticate to Strata Cloud Manager. `TF_TOKEN_APP_TERRAFORM_IO` authenticates Terraform CLI to HCP Terraform.
-
-To create the Terraform token:
-
-1. Open HCP Terraform.
-2. Go to user settings or organization settings for API tokens.
-3. Create a token that can access the workspace.
-4. Store it in GitHub as `TF_TOKEN_APP_TERRAFORM_IO`.
-
-## 5. Python Workflow
-
-Python-owned customers are managed with:
-
-```text
-customers-to-add.yaml
-customers-to-delete.yaml
-```
-
-Use `customers-to-add.yaml` to add or update Python-managed customer VPNs:
-
-```yaml
-customers:
-  - customer_name: "Customer-AB"
-    folder_name: "PANW-Python-Customer-AB"
-    customer_network: "10.24.0.0/16"
-    customer_network_object: "customer-AB-Net"
-    peer_ip: "203.0.113.20"
-    psk: "replace-with-real-psk"
-    tunnel_number: 11
-    zone_name: "Customer-AB-Zone"
-    ike_gateway_name: "Customer-AB-IKE-GW"
-    ipsec_tunnel_name: "Customer-AB-Tunnel"
-    security_rule_name: "allow-customer-ab-to-panw-python"
-```
-
-Use `customers-to-delete.yaml` to delete Python-managed folders:
-
-```yaml
-folders_to_delete:
-  - "PANW-Python-Customer-AB"
-```
+- `customers-to-add.yaml`
+- `customers-to-delete.yaml`
+- `deploy-multi-vpn.py`
 
 Expected workflow:
 
-1. Edit `customers-to-add.yaml` or `customers-to-delete.yaml`.
-2. Commit and push your branch.
-3. Open a pull request into `main`.
-4. The Python workflow validates the YAML on the pull request.
-5. Merge to `main`.
-6. The Python workflow runs automatically.
+1. Create a feature branch from `dev`.
+2. Edit `customers-to-add.yaml` to add/update Python-managed customers, or `customers-to-delete.yaml` to delete Python-managed customer device groups.
+3. Open a PR into `dev`.
+4. The Python GitHub Actions workflow validates the YAML on the PR.
+5. Merge to `dev`.
+6. The Python workflow runs automatically, deploys/deletes the Python-managed VPN resources, and commits to Panorama.
 
-## 6. Terraform Workflow
+## Terraform Workflow
 
-Terraform-owned customers are managed with:
+Terraform-owned customers are configured with:
 
-```text
-customers-terraform.yaml
-```
-
-Add customers to the `customers` list:
-
-```yaml
-customers:
-  - customer_name: "Customer-AB"
-    folder_name: "PANW-Terraform-Customer-AB"
-    customer_network: "10.24.0.0/16"
-    customer_network_object: "customer-AB-Net"
-    peer_ip: "203.0.113.20"
-    psk: "replace-with-real-psk"
-    tunnel_number: 11
-    zone_name: "Customer-AB-Zone"
-    ike_gateway_name: "Customer-AB-IKE-GW"
-    ipsec_tunnel_name: "Customer-AB-Tunnel"
-    security_rule_name: "allow-customer-ab-to-panw-terraform"
-    enabled: true
-```
-
-To remove a Terraform-managed customer, remove that customer from `customers-terraform.yaml`. Terraform will plan to destroy the resources it manages for that customer.
+- `customers-terraform.yaml`
+- Terraform code under `terraform/` (uses the [PaloAltoNetworks/panos](https://registry.terraform.io/providers/PaloAltoNetworks/panos/latest/docs) v2 provider)
 
 Expected workflow:
 
-1. Edit `customers-terraform.yaml`.
-2. Commit and push your branch.
-3. Open a pull request into `main`.
-4. The Terraform workflow runs `terraform plan`.
+1. Create a feature branch from `dev`.
+2. Edit `customers-terraform.yaml`.
+3. Open a PR into `dev`.
+4. The Terraform GitHub Actions workflow runs `terraform plan` on the PR.
 5. Review the plan.
-6. Merge to `main`.
-7. The Terraform workflow runs `terraform apply -auto-approve`.
+6. Merge to `dev`.
+7. The Terraform workflow runs `terraform apply -auto-approve` automatically and commits to Panorama.
 
-## 7. Local Testing
+## Local Testing
 
-Install Python dependencies:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-```
-
-For local Python testing, set credentials in your shell or a local `.env` file:
+For local testing, keep credentials in `.env` or your shell:
 
 ```text
-PANW_CLIENT_ID=...
-PANW_CLIENT_SECRET=...
-PANW_TSG_ID=...
+PANORAMA_HOST=...
+PANORAMA_API_KEY=...
 ```
 
-Run the Python workflow locally:
+Do not commit `.env`.
+
+Python:
 
 ```bash
+pip install -r requirements.txt
 python deploy-multi-vpn.py
 ```
 
-For local Terraform testing, copy the Terraform customer file into the Terraform module directory, then run Terraform:
+Terraform (the config reads `terraform/customers.yaml`, so copy the customer file first):
 
 ```bash
+export PANOS_HOSTNAME="$PANORAMA_HOST"
+export PANOS_API_KEY="$PANORAMA_API_KEY"
 cp customers-terraform.yaml terraform/customers.yaml
 terraform -chdir=terraform init
 terraform -chdir=terraform plan
 ```
 
-Do not commit `.env`, `terraform.tfvars`, Terraform state files, or plan files.
+Because Terraform uses the HCP Terraform `cloud` block with local execution mode, local and GitHub Actions `plan/apply` commands use the HCP Terraform workspace for shared state.
 
-## 8. Safety Rules
+## Safety Rules
 
-- Python automation should only touch resources under `PANW Python Global`.
-- Terraform automation should only touch resources under `PANW Terraform Global`.
-- Use pull requests into `main` for both workflows.
+- Python automation should only touch `PANW-Python-Template` and device groups under `PANW-Python-Global`.
+- Terraform automation should only touch `PANW-Terraform-Template` and device groups under `PANW-Terraform-Global`.
+- Use PRs into `dev` for both workflows.
 - Review Terraform plans before merging.
-- Never commit real API credentials, `.env`, `terraform.tfvars`, state files, generated secrets, or real PSKs.
+- Never commit real API credentials, `.env`, state files, or generated secrets.

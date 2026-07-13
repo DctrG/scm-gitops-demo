@@ -3,9 +3,9 @@ output "customer_name" {
   value       = var.customer_config.customer_name
 }
 
-output "folder_name" {
-  description = "Folder name"
-  value       = var.customer_config.folder_name
+output "device_group" {
+  description = "Device group name"
+  value       = var.customer_config.device_group
 }
 
 output "zone_name" {
@@ -17,6 +17,3 @@ output "tunnel_name" {
   description = "IPsec tunnel name"
   value       = var.customer_config.ipsec_tunnel_name
 }
-
-
-

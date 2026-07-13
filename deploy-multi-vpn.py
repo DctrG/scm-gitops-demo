@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """
-Strata Cloud Manager (PANW) - Multi-Customer VPN Deployment Script
+Panorama (PAN-OS XML API) - Multi-Customer VPN Deployment Script
 
-Reads customer configurations from customers-to-add.yaml and creates IPsec VPN connections
-for each customer with their own folder structure.
+Reads customer configurations from customers-to-add.yaml and creates IPsec VPN
+connections for each customer:
+
+  - Shared config (template, ethernet interface, IKE/IPsec crypto profiles)
+    lives in one Panorama template.
+  - Per-customer config: tunnel interface, zone, IKE gateway and IPsec tunnel
+    in the template; address objects and a security rule in a per-customer
+    device group nested under a parent device group.
 
 Requirements:
   pip install requests pyyaml python-dotenv
@@ -14,13 +20,14 @@ Usage:
 
 from __future__ import annotations
 
-import json
 import os
 import sys
-from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+import time
+import xml.etree.ElementTree as ET
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+import urllib3
 import yaml
 
 # Try to load .env file if python-dotenv is available
@@ -28,59 +35,32 @@ try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
-    # python-dotenv not installed, skip loading .env file
     pass
+
+# Panorama demo instances typically use self-signed certificates
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Disable proxy inheritance from environment
 for proxy_var in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
     os.environ.pop(proxy_var, None)
 
-# Create a session that doesn't trust environment variables
 _session = requests.Session()
 _session.trust_env = False
-_session.proxies = {}  # Explicitly disable proxies
+_session.proxies = {}
+_session.verify = False
 
 
 # -----------------------------
 # Configuration
 # -----------------------------
-@dataclass(frozen=True)
-class AuthConfig:
-    """OAuth2 credentials (service account)"""
-    client_id: str = os.environ.get("PANW_CLIENT_ID")
-    client_secret: str = os.environ.get("PANW_CLIENT_SECRET")
-    tsg_id: str = os.environ.get("PANW_TSG_ID")  # Tenant Service Group ID
+PANORAMA_HOST = os.environ.get("PANORAMA_HOST")
+PANORAMA_API_KEY = os.environ.get("PANORAMA_API_KEY")
 
-
-AUTH = AuthConfig()
+LOCALHOST = "/config/devices/entry[@name='localhost.localdomain']"
 
 
 # -----------------------------
-# Endpoints
-# -----------------------------
-BASE = "https://api.strata.paloaltonetworks.com"
-TOKEN_URL = "https://auth.apps.paloaltonetworks.com/oauth2/access_token"
-
-# Setup
-FOLDERS = f"{BASE}/config/setup/v1/folders"
-
-# Network
-ZONES = f"{BASE}/config/network/v1/zones"
-TUNNEL_INTERFACES = f"{BASE}/config/network/v1/tunnel-interfaces"
-IKE_CRYPTO_PROFILES = f"{BASE}/config/network/v1/ike-crypto-profiles"
-IPSEC_CRYPTO_PROFILES = f"{BASE}/config/network/v1/ipsec-crypto-profiles"
-IKE_GATEWAYS = f"{BASE}/config/network/v1/ike-gateways"
-IPSEC_TUNNELS = f"{BASE}/config/network/v1/ipsec-tunnels"
-
-# Objects
-ADDRESSES = f"{BASE}/config/objects/v1/addresses"
-
-# Security
-SECURITY_RULES = f"{BASE}/config/security/v1/security-rules"
-
-
-# -----------------------------
-# Helpers
+# XML API helpers
 # -----------------------------
 class ApiError(RuntimeError):
     pass
@@ -91,173 +71,119 @@ def die(msg: str) -> None:
     sys.exit(1)
 
 
-def get_token(client_id: str, client_secret: str, tsg_id: str) -> str:
-    r = _session.post(
-        TOKEN_URL,
-        auth=(client_id, client_secret),
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        data={"grant_type": "client_credentials", "scope": f"tsg_id:{tsg_id}"},
-        timeout=60,
-    )
-    if not r.ok:
-        raise ApiError(f"Token request failed: {r.status_code} {r.text}")
-    j = r.json()
-    token = j.get("access_token")
-    if not token:
-        raise ApiError(f"Token response missing access_token: {j}")
-    return token
-
-
-def request_json(
-    method: str,
-    url: str,
-    token: str,
-    *,
-    params: Optional[Dict[str, Any]] = None,
-    body: Optional[Dict[str, Any]] = None,
-    ok_status: Tuple[int, ...] = (200, 201, 202),
-) -> Tuple[int, Dict[str, Any]]:
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/json",
-    }
-    if body is not None:
-        headers["Content-Type"] = "application/json"
-
-    r = _session.request(
-        method,
-        url,
-        headers=headers,
-        params=params,
-        data=json.dumps(body) if body is not None else None,
-        timeout=60,
-    )
-
-    if r.status_code in ok_status:
-        return r.status_code, (r.json() if r.text else {})
-    if r.status_code == 409:
-        return r.status_code, (r.json() if r.text else {})
-
-    raise ApiError(f"{method} {url} failed: {r.status_code} {r.text}")
-
-
-def extract_id(payload: Dict[str, Any]) -> Optional[str]:
-    """Extract ID from various SCM response formats."""
-    if "id" in payload and isinstance(payload["id"], str):
-        return payload["id"]
-    data = payload.get("data")
-    if isinstance(data, dict) and isinstance(data.get("id"), str):
-        return data["id"]
-    return None
-
-
-def list_by_name(url: str, token: str, name: str, folder_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """List and filter by name, optionally by folder."""
-    params: Dict[str, Any] = {"name": name}
-    if folder_id:
-        params["folder"] = folder_id
-    
+def api_request(params: Dict[str, str], ignore_errors: bool = False) -> Optional[ET.Element]:
+    """Send a request to the Panorama XML API and return the parsed response root."""
+    url = f"https://{PANORAMA_HOST}/api/"
+    r = _session.get(url, params=params, headers={"X-PAN-KEY": PANORAMA_API_KEY}, timeout=120)
     try:
-        _, j = request_json("GET", url, token, params=params, ok_status=(200,))
-    except ApiError:
-        try:
-            _, j = request_json("GET", url, token, params=None, ok_status=(200,))
-        except ApiError:
+        root = ET.fromstring(r.text)
+    except ET.ParseError as e:
+        raise ApiError(f"Invalid XML response from Panorama: {e}: {r.text[:500]}")
+
+    if root.get("status") != "success":
+        if ignore_errors:
             return None
+        msg = root.findtext(".//msg") or ET.tostring(root, encoding="unicode")
+        # <msg><line>...</line></msg> style errors
+        lines = [el.text for el in root.findall(".//msg/line") if el.text]
+        if lines:
+            msg = "; ".join(lines)
+        raise ApiError(f"Panorama API error (code={root.get('code')}): {msg}")
+    return root
 
-    items = j.get("data")
-    if not isinstance(items, list):
+
+def config_get(xpath: str) -> Optional[ET.Element]:
+    """Get a config node. Returns the <result> element, or None if empty."""
+    root = api_request({"type": "config", "action": "get", "xpath": xpath})
+    result = root.find("result")
+    if result is None:
         return None
-
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        if item.get("name") != name:
-            continue
-        if folder_id:
-            item_folder = item.get("folder") or item.get("folder_id")
-            if item_folder and item_folder != folder_id:
-                continue
-        return item
-
-    return None
+    if result.get("total-count") == "0":
+        return None
+    if len(list(result)) == 0 and not (result.text or "").strip():
+        return None
+    return result
 
 
-def create_or_get(
-    *,
-    create_url: str,
-    list_url: str,
-    token: str,
-    name: str,
-    body: Dict[str, Any],
-    folder_id: Optional[str] = None,
-    resource_type: str = "Resource",
-) -> str:
-    """Create a resource or get existing one. Returns the resource ID."""
-    existing = list_by_name(list_url, token, name, folder_id=folder_id)
-    if existing:
-        eid = existing.get("id")
-        if isinstance(eid, str):
-            folder_info = f" in folder '{folder_id}'" if folder_id else ""
-            print(f"  → {resource_type} '{name}' already exists{folder_info}")
-            return eid
+def config_set(xpath: str, element: str) -> None:
+    api_request({"type": "config", "action": "set", "xpath": xpath, "element": element})
 
-    try:
-        status, j = request_json("POST", create_url, token, body=body, ok_status=(200, 201, 202, 400, 409))
-    except ApiError as e:
-        error_str = str(e)
-        if "400" in error_str and ("already exists" in error_str.lower() or "OBJECT_ALREADY_EXISTS" in error_str):
-            existing = list_by_name(list_url, token, name, folder_id=folder_id)
-            if existing and isinstance(existing.get("id"), str):
-                eid = existing["id"]
-                print(f"  ✓ {resource_type} '{name}' already exists")
-                return eid
-            print(f"  ✓ {resource_type} '{name}' already exists")
-            return name
-        raise
-    
-    if status == 409:
-        existing = list_by_name(list_url, token, name, folder_id=folder_id)
-        if existing and isinstance(existing.get("id"), str):
-            eid = existing["id"]
-            print(f"  ✓ {resource_type} '{name}' already exists")
-            return eid
-        raise ApiError(f"Conflict creating {name} but could not find it via list endpoint. Response: {j}")
-    
-    if status == 400:
-        error_msg = str(j)
-        if "already exists" in error_msg.lower() or "OBJECT_ALREADY_EXISTS" in error_msg:
-            existing = list_by_name(list_url, token, name, folder_id=folder_id)
-            if existing and isinstance(existing.get("id"), str):
-                eid = existing["id"]
-                print(f"  ✓ {resource_type} '{name}' already exists")
-                return eid
-            print(f"  ✓ {resource_type} '{name}' already exists")
-            return name
 
-    new_id = extract_id(j)
-    if not new_id:
-        if isinstance(j.get("id"), str):
-            new_id = j["id"]
-    if not new_id:
-        raise ApiError(f"Create succeeded but could not extract id for {name}. Response: {j}")
+def config_delete(xpath: str) -> bool:
+    """Delete a config node. Returns False if it did not exist."""
+    root = api_request({"type": "config", "action": "delete", "xpath": xpath}, ignore_errors=True)
+    return root is not None
 
+
+def ensure(xpath: str, element: str, resource_type: str, name: str) -> None:
+    """Create a config node if it does not already exist (idempotent)."""
+    if config_get(xpath) is not None:
+        print(f"  → {resource_type} '{name}' already exists")
+        return
+    config_set(xpath, element)
     print(f"  ✓ Created {resource_type.lower()} '{name}' successfully")
-    return new_id
 
 
+def commit(description: str) -> None:
+    """Commit candidate configuration to Panorama and wait for the job to finish."""
+    print(f"\n{'='*70}")
+    print("Committing configuration to Panorama...")
+    print(f"{'='*70}")
+    root = api_request({
+        "type": "commit",
+        "cmd": f"<commit><description>{description}</description></commit>",
+    })
+    job_id = root.findtext(".//job")
+    if not job_id:
+        msg = root.findtext(".//msg") or ""
+        print(f"  → No commit job started ({msg or 'no changes to commit'})")
+        return
+
+    print(f"  → Commit job {job_id} started, waiting for completion...")
+    for _ in range(90):
+        time.sleep(5)
+        jr = api_request({"type": "op", "cmd": f"<show><jobs><id>{job_id}</id></jobs></show>"})
+        status = jr.findtext(".//status")
+        progress = jr.findtext(".//progress")
+        if status == "FIN":
+            result = jr.findtext(".//result")
+            if result == "OK":
+                print(f"  ✓ Commit job {job_id} completed successfully")
+                return
+            details = "; ".join(el.text for el in jr.findall(".//details/line") if el.text)
+            raise ApiError(f"Commit job {job_id} finished with result {result}: {details}")
+        print(f"    Commit in progress... ({progress}%)")
+    raise ApiError(f"Commit job {job_id} did not finish in time")
+
+
+# -----------------------------
+# XPath builders
+# -----------------------------
+def dg_xpath(device_group: str) -> str:
+    return f"{LOCALHOST}/device-group/entry[@name='{device_group}']"
+
+
+def template_xpath(template: str) -> str:
+    return f"{LOCALHOST}/template/entry[@name='{template}']"
+
+
+def tpl_vsys_xpath(template: str) -> str:
+    return f"{template_xpath(template)}{LOCALHOST}/vsys/entry[@name='vsys1']"
+
+
+def tpl_network_xpath(template: str) -> str:
+    return f"{template_xpath(template)}{LOCALHOST}/network"
+
+
+# -----------------------------
+# YAML loading
+# -----------------------------
 def load_customers(yaml_file: str = "customers-to-add.yaml") -> Tuple[Dict[str, Any], list]:
-    """Load customer configurations from YAML file."""
     try:
         with open(yaml_file, "r") as f:
-            data = yaml.safe_load(f)
-        if data is None:
-            data = {}
+            data = yaml.safe_load(f) or {}
         global_config = data.get("global", {}) or {}
-        customers = data.get("customers", [])
-        # Ensure customers is always a list, even if None
-        if customers is None:
-            customers = []
+        customers = data.get("customers") or []
         if not isinstance(customers, list):
             customers = []
         return global_config, customers
@@ -267,478 +193,447 @@ def load_customers(yaml_file: str = "customers-to-add.yaml") -> Tuple[Dict[str, 
         die(f"Error parsing YAML file: {e}")
 
 
-def load_folders_to_delete(yaml_file: str = "customers-to-delete.yaml") -> list:
-    """Load list of folder names to delete from YAML file."""
+def load_device_groups_to_delete(yaml_file: str = "customers-to-delete.yaml") -> list:
     try:
         with open(yaml_file, "r") as f:
-            data = yaml.safe_load(f)
-        folders = data.get("folders_to_delete", [])
-        return folders if isinstance(folders, list) else []
+            data = yaml.safe_load(f) or {}
+        device_groups = data.get("device_groups_to_delete", [])
+        return device_groups if isinstance(device_groups, list) else []
     except FileNotFoundError:
-        # File doesn't exist - return empty list (not an error)
         return []
     except yaml.YAMLError as e:
         print(f"  ⚠ Warning: Error parsing '{yaml_file}': {e}", file=sys.stderr)
         return []
 
 
-def deploy_customer_vpn(
-    token: str,
-    customer: Dict[str, Any],
-    global_config: Dict[str, Any],
-    root_folder_name: str,
-) -> None:
-    """Deploy VPN configuration for a single customer."""
+# -----------------------------
+# Device group hierarchy
+# -----------------------------
+def get_dg_parent(device_group: str) -> Optional[str]:
+    """Return the parent device group name from the dg-hierarchy, or None."""
+    root = api_request({"type": "op", "cmd": "<show><dg-hierarchy/></show>"})
+
+    def walk(element: ET.Element, parent_name: Optional[str]) -> Optional[str]:
+        for child in element.findall("dg"):
+            if child.get("name") == device_group:
+                return parent_name
+            found = walk(child, child.get("name"))
+            if found is not None:
+                return found
+        return None
+
+    hierarchy = root.find(".//dg-hierarchy")
+    if hierarchy is None:
+        return None
+    return walk(hierarchy, None)
+
+
+def ensure_dg_parent(device_group: str, parent: str) -> None:
+    current = get_dg_parent(device_group)
+    if current == parent:
+        print(f"  → Device group '{device_group}' already nested under '{parent}'")
+        return
+    api_request({
+        "type": "op",
+        "cmd": f"<request><move-dg><entry name='{device_group}'><new-parent-dg>{parent}</new-parent-dg></entry></move-dg></request>",
+    })
+    print(f"  ✓ Moved device group '{device_group}' under '{parent}'")
+
+
+def list_customer_device_groups(prefix: str) -> List[str]:
+    """List all device groups whose name starts with the given prefix."""
+    result = config_get(f"{LOCALHOST}/device-group")
+    if result is None:
+        return []
+    names = []
+    for entry in result.findall(".//device-group/entry"):
+        name = entry.get("name")
+        if name and name.startswith(prefix):
+            names.append(name)
+    return names
+
+
+# -----------------------------
+# Shared (global) configuration
+# -----------------------------
+def deploy_shared_config(global_config: Dict[str, Any]) -> None:
+    template = global_config["template"]
+    parent_dg = global_config["parent_device_group"]
+    local_interface = global_config.get("local_interface", "ethernet1/1")
+    virtual_router = global_config.get("virtual_router", "default")
+    ike_profile = global_config.get("ike_profile", "PANW-Python-IKEv2-Standard")
+    ipsec_profile = global_config.get("ipsec_profile", "PANW-Python-IPsec-Standard")
+
+    print(f"\n[Step 0] Creating shared Panorama configuration...")
+
+    # Template with a default vsys
+    ensure(
+        template_xpath(template),
+        "<settings><default-vsys>vsys1</default-vsys></settings>"
+        "<config><devices><entry name='localhost.localdomain'>"
+        "<vsys><entry name='vsys1'/></vsys></entry></devices></config>",
+        "Template", template,
+    )
+
+    # Parent device group for all Python-managed customers
+    ensure(
+        dg_xpath(parent_dg),
+        "<description>Parent device group for Python-managed PANW customer VPNs</description>",
+        "Device group", parent_dg,
+    )
+
+    # Ethernet interface used as the IKE gateway local interface
+    ensure(
+        f"{tpl_network_xpath(template)}/interface/ethernet/entry[@name='{local_interface}']",
+        "<layer3/>",
+        "Ethernet interface", local_interface,
+    )
+    config_set(
+        f"{tpl_vsys_xpath(template)}/import/network/interface",
+        f"<member>{local_interface}</member>",
+    )
+
+    # Virtual router
+    ensure(
+        f"{tpl_network_xpath(template)}/virtual-router/entry[@name='{virtual_router}']",
+        f"<interface><member>{local_interface}</member></interface>",
+        "Virtual router", virtual_router,
+    )
+
+    # IKE crypto profile
+    ensure(
+        f"{tpl_network_xpath(template)}/ike/crypto-profiles/ike-crypto-profiles/entry[@name='{ike_profile}']",
+        "<hash><member>sha256</member></hash>"
+        "<dh-group><member>group14</member></dh-group>"
+        "<encryption><member>aes-256-cbc</member></encryption>"
+        "<lifetime><hours>8</hours></lifetime>",
+        "IKE crypto profile", ike_profile,
+    )
+
+    # IPsec crypto profile
+    ensure(
+        f"{tpl_network_xpath(template)}/ike/crypto-profiles/ipsec-crypto-profiles/entry[@name='{ipsec_profile}']",
+        "<esp><encryption><member>aes-256-cbc</member></encryption>"
+        "<authentication><member>sha256</member></authentication></esp>"
+        "<dh-group>group14</dh-group>"
+        "<lifetime><hours>1</hours></lifetime>",
+        "IPsec crypto profile", ipsec_profile,
+    )
+
+
+# -----------------------------
+# Per-customer deployment
+# -----------------------------
+def deploy_customer_vpn(customer: Dict[str, Any], global_config: Dict[str, Any]) -> None:
     customer_name = customer["customer_name"]
-    folder_name = customer["folder_name"]
-    
+    device_group = customer["device_group"]
+    template = global_config["template"]
+    parent_dg = global_config["parent_device_group"]
+    local_interface = global_config.get("local_interface", "ethernet1/1")
+    virtual_router = global_config.get("virtual_router", "default")
+    ike_profile = global_config.get("ike_profile", "PANW-Python-IKEv2-Standard")
+    ipsec_profile = global_config.get("ipsec_profile", "PANW-Python-IPsec-Standard")
+
+    tunnel_if_name = f"tunnel.{customer['tunnel_number']}"
+
     print(f"\n{'='*70}")
     print(f"Deploying VPN for: {customer_name}")
     print(f"{'='*70}")
-    
-    # Step 1: Create customer folder
-    print(f"\n[Step 1] Creating folder '{folder_name}'...")
-    child_folder_id = create_or_get(
-        create_url=FOLDERS,
-        list_url=FOLDERS,
-        token=token,
-        name=folder_name,
-        body={
-            "name": folder_name,
-            "parent": root_folder_name,
-            "description": f"Folder for {customer_name} VPN configuration",
-        },
-        folder_id=None,
-        resource_type="Folder",
+
+    # Step 1: Device group nested under the parent device group
+    print(f"\n[Step 1] Creating device group '{device_group}'...")
+    ensure(
+        dg_xpath(device_group),
+        f"<description>Device group for {customer_name} VPN configuration</description>",
+        "Device group", device_group,
     )
-    
-    # Step 2: Create zone
-    print(f"\n[Step 2] Creating zone '{customer['zone_name']}'...")
-    zone_id = create_or_get(
-        create_url=ZONES,
-        list_url=ZONES,
-        token=token,
-        name=customer["zone_name"],
-        body={
-            "name": customer["zone_name"],
-            "folder": folder_name,
-        },
-        folder_id=folder_name,
-        resource_type="Zone",
+    ensure_dg_parent(device_group, parent_dg)
+
+    # Step 2: Tunnel interface (template)
+    print(f"\n[Step 2] Creating tunnel interface '{tunnel_if_name}'...")
+    ensure(
+        f"{tpl_network_xpath(template)}/interface/tunnel/units/entry[@name='{tunnel_if_name}']",
+        f"<comment>{customer_name}-Interface</comment>",
+        "Tunnel interface", tunnel_if_name,
     )
-    
-    # Step 3: Create tunnel interface
-    tunnel_if_name = f"$tunnel-{customer['tunnel_number']}"
-    tunnel_if_default = f"tunnel.{customer['tunnel_number']}"
-    print(f"\n[Step 3] Creating tunnel interface '{tunnel_if_name}' ({tunnel_if_default})...")
-    tunnel_if_id = create_or_get(
-        create_url=TUNNEL_INTERFACES,
-        list_url=TUNNEL_INTERFACES,
-        token=token,
-        name=tunnel_if_name,
-        body={
-            "name": tunnel_if_name,
-            "default_value": tunnel_if_default,
-            "comment": f"{customer_name}-Interface",
-            "folder": folder_name,
-        },
-        folder_id=folder_name,
-        resource_type="Tunnel interface",
+    config_set(
+        f"{tpl_vsys_xpath(template)}/import/network/interface",
+        f"<member>{tunnel_if_name}</member>",
     )
-    
-    # Step 4: Create IKE crypto profile (shared, but create per customer folder)
-    ike_profile_name = global_config.get("ike_profile", "PANW-Python-IKEv2-Standard")
-    print(f"\n[Step 4] Creating IKE crypto profile '{ike_profile_name}'...")
-    ike_crypto_id = create_or_get(
-        create_url=IKE_CRYPTO_PROFILES,
-        list_url=IKE_CRYPTO_PROFILES,
-        token=token,
-        name=ike_profile_name,
-        body={
-            "name": ike_profile_name,
-            "hash": ["sha256"],
-            "encryption": ["aes-256-cbc"],
-            "dh_group": ["group14"],
-            "folder": folder_name,
-        },
-        folder_id=folder_name,
-        resource_type="IKE crypto profile",
+    config_set(
+        f"{tpl_network_xpath(template)}/virtual-router/entry[@name='{virtual_router}']/interface",
+        f"<member>{tunnel_if_name}</member>",
     )
-    
-    # Step 5: Create IPsec crypto profile (shared, but create per customer folder)
-    ipsec_profile_name = global_config.get("ipsec_profile", "PANW-Python-IPsec-Standard")
-    print(f"\n[Step 5] Creating IPsec crypto profile '{ipsec_profile_name}'...")
-    ipsec_crypto_id = create_or_get(
-        create_url=IPSEC_CRYPTO_PROFILES,
-        list_url=IPSEC_CRYPTO_PROFILES,
-        token=token,
-        name=ipsec_profile_name,
-        body={
-            "name": ipsec_profile_name,
-            "esp": {
-                "encryption": ["aes-256-cbc"],
-                "authentication": ["sha256"],
-            },
-            "lifetime": {"seconds": 3600},
-            "folder": folder_name,
-        },
-        folder_id=folder_name,
-        resource_type="IPsec crypto profile",
+
+    # Step 3: Zone (template, vsys1)
+    print(f"\n[Step 3] Creating zone '{customer['zone_name']}'...")
+    ensure(
+        f"{tpl_vsys_xpath(template)}/zone/entry[@name='{customer['zone_name']}']",
+        f"<network><layer3><member>{tunnel_if_name}</member></layer3></network>",
+        "Zone", customer["zone_name"],
     )
-    
-    # Step 6: Create IKE gateway
-    print(f"\n[Step 6] Creating IKE gateway '{customer['ike_gateway_name']}'...")
-    ike_gw_id = create_or_get(
-        create_url=IKE_GATEWAYS,
-        list_url=IKE_GATEWAYS,
-        token=token,
-        name=customer["ike_gateway_name"],
-        body={
-            "name": customer["ike_gateway_name"],
-            "protocol": {"version": "ikev2"},
-            "peer_address": {"ip": customer["peer_ip"]},
-            "authentication": {
-                "pre_shared_key": {"key": customer["psk"]},
-            },
-            "local_address": {"ip": global_config.get("local_public_ip")} if global_config.get("local_public_ip") else {},
-            "local_interface": [global_config.get("local_interface", "ethernet1/1")],
-            "ike_crypto_profile_id": ike_crypto_id,
-            "folder": folder_name,
-        },
-        folder_id=folder_name,
-        resource_type="IKE gateway",
+
+    # Step 4: IKE gateway (template)
+    print(f"\n[Step 4] Creating IKE gateway '{customer['ike_gateway_name']}'...")
+    ensure(
+        f"{tpl_network_xpath(template)}/ike/gateway/entry[@name='{customer['ike_gateway_name']}']",
+        f"<authentication><pre-shared-key><key>{customer['psk']}</key></pre-shared-key></authentication>"
+        f"<protocol><ikev2><ike-crypto-profile>{ike_profile}</ike-crypto-profile>"
+        "<dpd><enable>yes</enable></dpd></ikev2>"
+        "<version>ikev2</version></protocol>"
+        "<protocol-common><nat-traversal><enable>yes</enable></nat-traversal>"
+        "<fragmentation><enable>no</enable></fragmentation></protocol-common>"
+        f"<local-address><interface>{local_interface}</interface></local-address>"
+        f"<peer-address><ip>{customer['peer_ip']}</ip></peer-address>",
+        "IKE gateway", customer["ike_gateway_name"],
     )
-    
-    # Step 7: Create IPsec tunnel
-    print(f"\n[Step 7] Creating IPsec tunnel '{customer['ipsec_tunnel_name']}'...")
-    ipsec_tunnel_id = create_or_get(
-        create_url=IPSEC_TUNNELS,
-        list_url=IPSEC_TUNNELS,
-        token=token,
-        name=customer["ipsec_tunnel_name"],
-        body={
-            "name": customer["ipsec_tunnel_name"],
-            "tunnel_interface": tunnel_if_name,
-            "auto_key": {
-                "ike_gateway": [{"name": customer["ike_gateway_name"]}],
-                "ipsec_crypto_profile": ipsec_profile_name,
-            },
-            "folder": folder_name,
-        },
-        folder_id=folder_name,
-        resource_type="IPsec tunnel",
+
+    # Step 5: IPsec tunnel (template)
+    print(f"\n[Step 5] Creating IPsec tunnel '{customer['ipsec_tunnel_name']}'...")
+    ensure(
+        f"{tpl_network_xpath(template)}/tunnel/ipsec/entry[@name='{customer['ipsec_tunnel_name']}']",
+        f"<tunnel-interface>{tunnel_if_name}</tunnel-interface>"
+        f"<auto-key><ike-gateway><entry name='{customer['ike_gateway_name']}'/></ike-gateway>"
+        f"<ipsec-crypto-profile>{ipsec_profile}</ipsec-crypto-profile></auto-key>",
+        "IPsec tunnel", customer["ipsec_tunnel_name"],
     )
-    
-    # Step 8: Create address objects
-    print(f"\n[Step 8] Creating address objects...")
-    print(f"  → Creating customer network object '{customer['customer_network_object']}' ({customer['customer_network']})...")
-    cust_addr_id = create_or_get(
-        create_url=ADDRESSES,
-        list_url=ADDRESSES,
-        token=token,
-        name=customer["customer_network_object"],
-        body={
-            "name": customer["customer_network_object"],
-            "ip_netmask": customer["customer_network"],
-            "folder": folder_name,
-        },
-        folder_id=folder_name,
-        resource_type="Address object",
+
+    # Step 6: Address objects (device group)
+    print(f"\n[Step 6] Creating address objects...")
+    ensure(
+        f"{dg_xpath(device_group)}/address/entry[@name='{customer['customer_network_object']}']",
+        f"<ip-netmask>{customer['customer_network']}</ip-netmask>",
+        "Address object", customer["customer_network_object"],
     )
-    
     panw_network_object = global_config.get("panw_network_object", "PANW-Python-net")
     panw_network = global_config.get("panw_network", "10.10.0.0/16")
-    print(f"  → Creating PANW network object '{panw_network_object}' ({panw_network})...")
-    panw_addr_id = create_or_get(
-        create_url=ADDRESSES,
-        list_url=ADDRESSES,
-        token=token,
-        name=panw_network_object,
-        body={
-            "name": panw_network_object,
-            "ip_netmask": panw_network,
-            "folder": folder_name,
-        },
-        folder_id=folder_name,
-        resource_type="Address object",
+    ensure(
+        f"{dg_xpath(device_group)}/address/entry[@name='{panw_network_object}']",
+        f"<ip-netmask>{panw_network}</ip-netmask>",
+        "Address object", panw_network_object,
     )
-    
-    # Step 9: Create security rule
-    print(f"\n[Step 9] Creating security rule '{customer['security_rule_name']}'...")
-    sec_rule_id = create_or_get(
-        create_url=SECURITY_RULES,
-        list_url=SECURITY_RULES,
-        token=token,
-        name=customer["security_rule_name"],
-        body={
-            "name": customer["security_rule_name"],
-            "from": [customer["zone_name"]],
-            "to": [global_config.get("to_zone", "trust")],
-            "source": [customer["customer_network_object"]],
-            "destination": [panw_network_object],
-            "application": ["any"],
-            "service": ["any"],
-            "category": ["any"],
-            "source_user": ["any"],
-            "action": "allow",
-            "folder": folder_name,
-        },
-        folder_id=folder_name,
-        resource_type="Security rule",
+
+    # Step 7: Security rule (device group pre-rulebase)
+    print(f"\n[Step 7] Creating security rule '{customer['security_rule_name']}'...")
+    ensure(
+        f"{dg_xpath(device_group)}/pre-rulebase/security/rules/entry[@name='{customer['security_rule_name']}']",
+        f"<from><member>{customer['zone_name']}</member></from>"
+        f"<to><member>{global_config.get('to_zone', 'trust')}</member></to>"
+        f"<source><member>{customer['customer_network_object']}</member></source>"
+        f"<destination><member>{panw_network_object}</member></destination>"
+        "<source-user><member>any</member></source-user>"
+        "<category><member>any</member></category>"
+        "<application><member>any</member></application>"
+        "<service><member>any</member></service>"
+        "<action>allow</action>",
+        "Security rule", customer["security_rule_name"],
     )
-    
+
     print(f"\n✓ VPN deployment completed for {customer_name}")
-    print(f"  Folder: {folder_name}")
+    print(f"  Device group: {device_group}")
     print(f"  Zone: {customer['zone_name']}")
     print(f"  Tunnel: {customer['ipsec_tunnel_name']}")
     print(f"  Peer IP: {customer['peer_ip']}")
 
 
-def list_folders_under_parent(token: str, parent_folder_name: str) -> list:
-    """List all folders under a parent folder."""
-    try:
-        # First get the parent folder to get its ID
-        parent_folder = list_by_name(FOLDERS, token, parent_folder_name, folder_id=None)
-        parent_folder_id = None
-        if parent_folder:
-            parent_folder_id = parent_folder.get("id")
-        
-        # List all folders
-        _, j = request_json("GET", FOLDERS, token, params=None, ok_status=(200,))
-        items = j.get("data", [])
-        if not isinstance(items, list):
-            return []
-        
-        folders = []
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            # Check if this folder's parent matches the parent_folder_name or parent_folder_id
-            parent = item.get("parent") or item.get("parent_id")
-            if parent == parent_folder_name or (parent_folder_id and parent == parent_folder_id):
-                folders.append({
-                    "name": item.get("name"),
-                    "id": item.get("id"),
-                })
-        return folders
-    except ApiError:
-        return []
+# -----------------------------
+# Deletion
+# -----------------------------
+def delete_customer(device_group: str, global_config: Dict[str, Any]) -> bool:
+    """Delete a customer device group and its template artifacts.
+
+    Template object names are derived from the device group name using the
+    repository naming convention:
+      PANW-Python-Customer-AB -> Customer-AB-Zone / Customer-AB-IKE-GW / Customer-AB-Tunnel
+    """
+    template = global_config["template"]
+    virtual_router = global_config.get("virtual_router", "default")
+    prefix = global_config.get("customer_prefix", "PANW-Python-")
+
+    base = device_group[len(prefix):] if device_group.startswith(prefix) else device_group
+    zone_name = f"{base}-Zone"
+    ike_gateway_name = f"{base}-IKE-GW"
+    ipsec_tunnel_name = f"{base}-Tunnel"
+
+    found_anything = config_get(dg_xpath(device_group)) is not None
+
+    # Find the tunnel interface used by this customer's IPsec tunnel
+    tunnel_if_name = None
+    tunnel_node = config_get(f"{tpl_network_xpath(template)}/tunnel/ipsec/entry[@name='{ipsec_tunnel_name}']")
+    if tunnel_node is not None:
+        tunnel_if_name = tunnel_node.findtext(".//tunnel-interface")
+
+    # Delete in reverse dependency order
+    if config_delete(f"{tpl_network_xpath(template)}/tunnel/ipsec/entry[@name='{ipsec_tunnel_name}']"):
+        print(f"    ✓ Deleted IPsec tunnel '{ipsec_tunnel_name}'")
+        found_anything = True
+    if config_delete(f"{tpl_network_xpath(template)}/ike/gateway/entry[@name='{ike_gateway_name}']"):
+        print(f"    ✓ Deleted IKE gateway '{ike_gateway_name}'")
+        found_anything = True
+    if config_delete(f"{tpl_vsys_xpath(template)}/zone/entry[@name='{zone_name}']"):
+        print(f"    ✓ Deleted zone '{zone_name}'")
+        found_anything = True
+    if tunnel_if_name:
+        config_delete(
+            f"{tpl_network_xpath(template)}/virtual-router/entry[@name='{virtual_router}']"
+            f"/interface/member[text()='{tunnel_if_name}']"
+        )
+        config_delete(f"{tpl_vsys_xpath(template)}/import/network/interface/member[text()='{tunnel_if_name}']")
+        if config_delete(f"{tpl_network_xpath(template)}/interface/tunnel/units/entry[@name='{tunnel_if_name}']"):
+            print(f"    ✓ Deleted tunnel interface '{tunnel_if_name}'")
+    if config_delete(dg_xpath(device_group)):
+        print(f"    ✓ Deleted device group '{device_group}'")
+        found_anything = True
+
+    return found_anything
 
 
-def delete_folder(token: str, folder_name: str) -> bool:
-    """Delete a folder by name. Returns True if deleted, False if not found."""
-    # First find the folder
-    folder = list_by_name(FOLDERS, token, folder_name, folder_id=None)
-    if not folder:
-        return False
-    
-    folder_id = folder.get("id")
-    if not folder_id:
-        return False
-    
-    try:
-        delete_url = f"{FOLDERS}/{folder_id}"
-        status, _ = request_json("DELETE", delete_url, token, ok_status=(200, 204, 404))
-        if status == 404:
-            return False  # Already deleted
-        return True
-    except ApiError as e:
-        # Check if it's a dependency error
-        error_msg = str(e)
-        if "409" in error_msg and "referencing" in error_msg.lower():
-            print(f"  ⚠ Cannot delete folder '{folder_name}': folder contains resources")
-            return False
-        print(f"  ✗ Failed to delete folder '{folder_name}': {e}")
-        return False
-
-
-def delete_customers_from_list(
-    token: str,
-    folders_to_delete: list,
-) -> None:
-    """Delete folders specified in the delete list."""
-    if not folders_to_delete:
+def delete_customers_from_list(device_groups_to_delete: list, global_config: Dict[str, Any]) -> None:
+    if not device_groups_to_delete:
         return
-    
+
     print(f"\n{'='*70}")
     print("Deleting customers from delete list...")
     print(f"{'='*70}")
-    print(f"\n  Found {len(folders_to_delete)} folder(s) to delete:")
-    for folder_name in sorted(folders_to_delete):
-        print(f"    • {folder_name}")
-    
-    deleted = []
-    failed = []
-    
-    for folder_name in sorted(folders_to_delete):
-        print(f"\n  → Deleting folder '{folder_name}'...")
-        if delete_folder(token, folder_name):
-            print(f"  ✓ Successfully deleted folder '{folder_name}'")
-            deleted.append(folder_name)
+    print(f"\n  Found {len(device_groups_to_delete)} device group(s) to delete:")
+    for name in sorted(device_groups_to_delete):
+        print(f"    • {name}")
+
+    deleted, missing = [], []
+    for name in sorted(device_groups_to_delete):
+        print(f"\n  → Deleting customer '{name}'...")
+        if delete_customer(name, global_config):
+            deleted.append(name)
         else:
-            failed.append(folder_name)
-    
+            print(f"    → Nothing found for '{name}' (already deleted?)")
+            missing.append(name)
+
     print(f"\n  Deletion summary:")
     print(f"    Deleted: {len(deleted)}")
-    print(f"    Failed: {len(failed)}")
-    
-    if failed:
-        print(f"\n  ⚠ Could not delete {len(failed)} folder(s) (may contain resources):")
-        for folder_name in failed:
-            print(f"    • {folder_name}")
+    print(f"    Not found: {len(missing)}")
 
 
-def cleanup_orphaned_folders(
-    token: str,
-    root_folder_name: str,
-    expected_folder_names: list,
-    folders_to_delete: list,
+def cleanup_orphaned_customers(
+    global_config: Dict[str, Any],
+    expected_device_groups: list,
+    device_groups_to_delete: list,
 ) -> None:
-    """Delete folders under root_folder_name that are not in expected_folder_names or delete list."""
+    """Delete customer device groups that are not in the add list or delete list."""
     print(f"\n{'='*70}")
-    print("Cleaning up orphaned folders...")
+    print("Cleaning up orphaned customers...")
     print(f"{'='*70}")
-    
-    # Get all folders under the root folder
-    existing_folders = list_folders_under_parent(token, root_folder_name)
-    existing_folder_names = {f["name"] for f in existing_folders if f.get("name")}
-    expected_folder_set = set(expected_folder_names)
-    delete_list_set = set(folders_to_delete)
-    
-    # Find folders that exist but are not in add list and not in delete list
-    # (folders in delete list are handled separately, so exclude them from orphaned)
-    orphaned_folders = existing_folder_names - expected_folder_set - delete_list_set
-    
-    if not orphaned_folders:
-        print("  ✓ No orphaned folders found - all folders match YAML configuration")
+
+    prefix = global_config.get("customer_prefix", "PANW-Python-") + "Customer-"
+    existing = set(list_customer_device_groups(prefix))
+    orphaned = existing - set(expected_device_groups) - set(device_groups_to_delete)
+
+    if not orphaned:
+        print("  ✓ No orphaned customers found - all device groups match YAML configuration")
         return
-    
-    print(f"\n  Found {len(orphaned_folders)} orphaned folder(s) to delete:")
-    for folder_name in sorted(orphaned_folders):
-        print(f"    • {folder_name}")
-    
-    deleted = []
-    failed = []
-    
-    for folder_name in sorted(orphaned_folders):
-        print(f"\n  → Deleting orphaned folder '{folder_name}'...")
-        if delete_folder(token, folder_name):
-            print(f"  ✓ Successfully deleted folder '{folder_name}'")
-            deleted.append(folder_name)
-        else:
-            failed.append(folder_name)
-    
-    print(f"\n  Cleanup summary:")
-    print(f"    Deleted: {len(deleted)}")
-    print(f"    Failed: {len(failed)}")
-    
-    if failed:
-        print(f"\n  ⚠ Could not delete {len(failed)} folder(s) (may contain resources):")
-        for folder_name in failed:
-            print(f"    • {folder_name}")
+
+    print(f"\n  Found {len(orphaned)} orphaned customer(s) to delete:")
+    for name in sorted(orphaned):
+        print(f"    • {name}")
+
+    for name in sorted(orphaned):
+        print(f"\n  → Deleting orphaned customer '{name}'...")
+        delete_customer(name, global_config)
 
 
+# -----------------------------
+# Main
+# -----------------------------
 def main() -> None:
     print("=" * 70)
-    print("Strata Cloud Manager - Multi-Customer VPN Deployment")
+    print("Panorama - Multi-Customer VPN Deployment")
     print("=" * 70)
     print("\nThis script will:")
     print("  • Read customer configurations from customers-to-add.yaml")
-    print("  • Delete folders listed in customers-to-delete.yaml")
-    print("  • Create folder hierarchy for each customer")
+    print("  • Delete customers listed in customers-to-delete.yaml")
+    print("  • Create shared template and device group hierarchy")
     print("  • Deploy IPsec VPN connections for all customers")
-    print("  • Delete orphaned folders (not in add or delete lists)")
+    print("  • Delete orphaned customers (not in add or delete lists)")
+    print("  • Commit the candidate configuration to Panorama")
     print("\n" + "-" * 70)
-    
-    # Load customer configurations
+
+    if not PANORAMA_HOST or not PANORAMA_API_KEY:
+        die("Please set PANORAMA_HOST and PANORAMA_API_KEY in .env or your shell.")
+
     print("\n[Step 0] Loading customer configurations...")
     global_config, customers = load_customers()
     print(f"  ✓ Loaded {len(customers)} customer(s) from customers-to-add.yaml")
-    
-    # Load folders to delete
-    print("\n[Step 0] Loading folders to delete...")
-    folders_to_delete = load_folders_to_delete()
-    if folders_to_delete:
-        print(f"  ✓ Loaded {len(folders_to_delete)} folder(s) from customers-to-delete.yaml")
+
+    if "template" not in global_config or "parent_device_group" not in global_config:
+        die("customers-to-add.yaml must define global.template and global.parent_device_group")
+
+    print("\n[Step 0] Loading customers to delete...")
+    device_groups_to_delete = load_device_groups_to_delete()
+    if device_groups_to_delete:
+        print(f"  ✓ Loaded {len(device_groups_to_delete)} device group(s) from customers-to-delete.yaml")
     else:
-        print(f"  ✓ No folders to delete (customers-to-delete.yaml is empty or doesn't exist)")
-    
-    # Authenticate
-    print("\n[Step 0] Authenticating with Strata Cloud Manager API...")
-    if not AUTH.client_id or not AUTH.client_secret or not AUTH.tsg_id:
-        die("Please set PANW_CLIENT_ID, PANW_CLIENT_SECRET, and PANW_TSG_ID in .env or your shell.")
-    token = get_token(AUTH.client_id, AUTH.client_secret, AUTH.tsg_id)
-    print("  ✓ Authentication successful")
-    
-    # Create root folder
-    root_folder_name = global_config.get("root_folder", "PANW Python Global")
-    print(f"\n[Step 0] Creating/verifying root folder '{root_folder_name}'...")
-    root_folder_id = create_or_get(
-        create_url=FOLDERS,
-        list_url=FOLDERS,
-        token=token,
-        name=root_folder_name,
-        body={
-            "name": root_folder_name,
-            "parent": "ngfw-shared",
-            "description": "Root folder for Python-managed PANW customer VPNs",
-        },
-        folder_id=None,
-        resource_type="Folder",
-    )
-    
-    # Step 1: Delete folders from delete list first
-    if folders_to_delete:
-        delete_customers_from_list(token, folders_to_delete)
-    
+        print("  ✓ No customers to delete (customers-to-delete.yaml is empty or doesn't exist)")
+
+    print("\n[Step 0] Verifying Panorama connectivity...")
+    info = api_request({"type": "op", "cmd": "<show><system><info></info></system></show>"})
+    hostname = info.findtext(".//hostname")
+    sw_version = info.findtext(".//sw-version")
+    print(f"  ✓ Connected to Panorama '{hostname}' (PAN-OS {sw_version})")
+
+    # Shared config (template, parent device group, profiles)
+    deploy_shared_config(global_config)
+
+    # Step 1: Delete customers from delete list first
+    if device_groups_to_delete:
+        delete_customers_from_list(device_groups_to_delete, global_config)
+
     # Step 2: Deploy VPN for each customer
+    successful, failed = [], []
     if customers:
         print(f"\n{'='*70}")
         print(f"Starting deployment for {len(customers)} customer(s)...")
         print(f"{'='*70}")
-        
-        successful = []
-        failed = []
-        
+
         for idx, customer in enumerate(customers, 1):
             try:
                 print(f"\n[{idx}/{len(customers)}] Processing {customer['customer_name']}...")
-                deploy_customer_vpn(token, customer, global_config, root_folder_name)
-                successful.append(customer['customer_name'])
+                deploy_customer_vpn(customer, global_config)
+                successful.append(customer["customer_name"])
             except Exception as e:
                 print(f"\n✗ Failed to deploy VPN for {customer['customer_name']}: {e}")
-                failed.append(customer['customer_name'])
+                failed.append(customer["customer_name"])
                 continue
-        
-        # Step 3: Cleanup orphaned folders (folders not in add list and not in delete list)
-        expected_folder_names = [customer["folder_name"] for customer in customers]
-        cleanup_orphaned_folders(token, root_folder_name, expected_folder_names, folders_to_delete)
-        
-        # Summary
+    else:
+        print("\n⚠ No customers to deploy (customers-to-add.yaml is empty)")
+
+    # Step 3: Cleanup orphaned customers
+    expected_device_groups = [customer["device_group"] for customer in customers]
+    cleanup_orphaned_customers(global_config, expected_device_groups, device_groups_to_delete)
+
+    # Step 4: Commit
+    commit("GitOps Python VPN automation")
+
+    # Summary
+    if customers:
         print(f"\n{'='*70}")
         print("DEPLOYMENT SUMMARY")
         print(f"{'='*70}")
         print(f"Total customers: {len(customers)}")
         print(f"Successful: {len(successful)}")
         print(f"Failed: {len(failed)}")
-        
+
         if successful:
             print(f"\n✓ Successfully deployed VPNs for:")
             for name in successful:
                 print(f"  • {name}")
-        
+
         if failed:
             print(f"\n✗ Failed deployments:")
             for name in failed:
                 print(f"  • {name}")
             sys.exit(1)
-        
+
         print(f"\n✓ All VPN deployments completed successfully!")
-    else:
-        print("\n⚠ No customers to deploy (customers-to-add.yaml is empty)")
-        # Still cleanup orphaned folders even if no customers to deploy
-        cleanup_orphaned_folders(token, root_folder_name, [], folders_to_delete)
-    
+
     print("=" * 70)
 
 
@@ -750,4 +645,3 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\n\nDeployment interrupted by user.")
         sys.exit(1)
-

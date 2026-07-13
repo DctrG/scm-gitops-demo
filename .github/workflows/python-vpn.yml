@@ -3,7 +3,7 @@ name: Deploy VPN (Python)
 on:
   pull_request:
     branches:
-      - main
+      - dev
     paths:
       - 'customers-to-add.yaml'
       - 'customers-to-delete.yaml'
@@ -13,7 +13,7 @@ on:
 
   push:
     branches:
-      - main
+      - dev
     paths:
       - 'customers-to-add.yaml'
       - 'customers-to-delete.yaml'
@@ -56,7 +56,6 @@ jobs:
       - name: Deploy Python-managed VPNs
         if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
         env:
-          PANW_CLIENT_ID: ${{ secrets.PANW_CLIENT_ID }}
-          PANW_CLIENT_SECRET: ${{ secrets.PANW_CLIENT_SECRET }}
-          PANW_TSG_ID: ${{ secrets.PANW_TSG_ID }}
+          PANORAMA_HOST: ${{ secrets.PANORAMA_HOST }}
+          PANORAMA_API_KEY: ${{ secrets.PANORAMA_API_KEY }}
         run: python deploy-multi-vpn.py
