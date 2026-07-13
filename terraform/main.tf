@@ -42,6 +42,13 @@ resource "panos_virtual_router" "vr" {
   }
 
   name = local.global_config.virtual_router
+
+  # Interface membership is owned by panos_virtual_router_interface resources,
+  # and the provider computes location.vsys after apply which would otherwise
+  # force replacement on every plan.
+  lifecycle {
+    ignore_changes = [interfaces, location]
+  }
 }
 
 # Interface memberships are managed with panos_virtual_router_interface
