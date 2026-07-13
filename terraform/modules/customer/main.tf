@@ -3,6 +3,12 @@ resource "scm_folder" "customer_folder" {
   name        = var.customer_config.folder_name
   parent      = var.root_folder_id
   description = "" # Explicitly set to empty string to avoid provider inconsistency
+
+  # The provider reports labels inconsistently ([] vs null), causing
+  # spurious updates that fail with "inconsistent result after apply".
+  lifecycle {
+    ignore_changes = [labels]
+  }
 }
 
 # Poll for folder propagation in SCM API

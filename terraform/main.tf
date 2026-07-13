@@ -3,6 +3,12 @@ resource "scm_folder" "root_folder" {
   name        = local.global_config.root_folder
   parent      = "ngfw-shared"
   description = "Root folder for Terraform-managed PANW customer VPNs"
+
+  # The provider reports labels inconsistently ([] vs null), causing
+  # spurious updates that fail with "inconsistent result after apply".
+  lifecycle {
+    ignore_changes = [labels]
+  }
 }
 
 resource "null_resource" "root_folder_propagation" {
