@@ -1,41 +1,41 @@
-name: Deploy VPN (Python)
+name: SCM VPN (Python)
 
 on:
   pull_request:
     branches:
       - main
     paths:
-      - 'customers-to-add.yaml'
-      - 'customers-to-delete.yaml'
-      - 'deploy-multi-vpn.py'
+      - 'scm/customers-to-add.yaml'
+      - 'scm/customers-to-delete.yaml'
+      - 'scm/deploy-multi-vpn.py'
       - 'requirements.txt'
-      - '.github/workflows/python-vpn.yml'
+      - '.github/workflows/scm-python.yml'
 
   push:
     branches:
       - main
     paths:
-      - 'customers-to-add.yaml'
-      - 'customers-to-delete.yaml'
-      - 'deploy-multi-vpn.py'
+      - 'scm/customers-to-add.yaml'
+      - 'scm/customers-to-delete.yaml'
+      - 'scm/deploy-multi-vpn.py'
       - 'requirements.txt'
-      - '.github/workflows/python-vpn.yml'
+      - '.github/workflows/scm-python.yml'
 
   workflow_dispatch:
 
 jobs:
   deploy:
-    name: Python VPN Automation
+    name: SCM Python VPN Automation
     runs-on: ubuntu-latest
     permissions:
       contents: read
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
@@ -43,6 +43,7 @@ jobs:
         run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
 
       - name: Validate customer YAML
+        working-directory: scm
         run: |
           python - <<'PY'
           import yaml
@@ -53,8 +54,9 @@ jobs:
               print(f"Validated {filename}")
           PY
 
-      - name: Deploy Python-managed VPNs
+      - name: Deploy SCM Python-managed VPNs
         if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+        working-directory: scm
         env:
           PANW_CLIENT_ID: ${{ secrets.PANW_CLIENT_ID }}
           PANW_CLIENT_SECRET: ${{ secrets.PANW_CLIENT_SECRET }}

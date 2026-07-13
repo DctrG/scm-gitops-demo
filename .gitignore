@@ -35,6 +35,9 @@ secrets.yaml
 
 # Terraform
 **/.terraform/
+**/terraform/customers.yaml
+**/terraform/.terraform.lock.hcl
+terraform.tfvars
 *.tfstate
 *.tfstate.*
 *.tfplan

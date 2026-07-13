@@ -1,21 +1,21 @@
-name: Deploy VPN (Terraform)
+name: SCM VPN (Terraform)
 
 on:
   pull_request:
     branches:
       - main
     paths:
-      - 'customers-terraform.yaml'
-      - 'terraform/**'
-      - '.github/workflows/deploy-vpn.yml'
+      - 'scm/customers-terraform.yaml'
+      - 'scm/terraform/**'
+      - '.github/workflows/scm-terraform.yml'
 
   push:
     branches:
       - main
     paths:
-      - 'customers-terraform.yaml'
-      - 'terraform/**'
-      - '.github/workflows/deploy-vpn.yml'
+      - 'scm/customers-terraform.yaml'
+      - 'scm/terraform/**'
+      - '.github/workflows/scm-terraform.yml'
 
   workflow_dispatch:
     inputs:
@@ -31,7 +31,7 @@ on:
 
 jobs:
   deploy:
-    name: Terraform VPN Automation
+    name: SCM Terraform VPN Automation
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -48,53 +48,52 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Prepare Terraform customer file
-        run: cp customers-terraform.yaml terraform/customers.yaml
+        run: cp scm/customers-terraform.yaml scm/terraform/customers.yaml
 
       - name: Set up Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: "1.11.4"
           terraform_wrapper: false
           cli_config_credentials_token: ${{ secrets.TF_TOKEN_APP_TERRAFORM_IO }}
 
       - name: Cache Terraform providers
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ env.TF_PLUGIN_CACHE_DIR }}
-          key: terraform-providers-${{ runner.os }}-${{ hashFiles('terraform/versions.tf') }}
+          key: terraform-providers-scm-${{ runner.os }}-${{ hashFiles('scm/terraform/versions.tf') }}
           restore-keys: |
-            terraform-providers-${{ runner.os }}-
+            terraform-providers-scm-${{ runner.os }}-
 
       - name: Create Terraform plugin cache directory
         run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
 
       - name: Terraform fmt
-        working-directory: terraform
+        working-directory: scm/terraform
         run: terraform fmt -check -recursive
 
       - name: Terraform init
-        working-directory: terraform
+        working-directory: scm/terraform
         run: terraform init
 
       - name: Terraform validate
-        working-directory: terraform
+        working-directory: scm/terraform
         run: terraform validate
 
       - name: Terraform plan
         if: ${{ github.event_name == 'pull_request' || inputs.terraform_action == 'plan' }}
-        working-directory: terraform
+        working-directory: scm/terraform
         run: terraform plan
 
       - name: Terraform apply
         if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.terraform_action == 'apply') }}
-        working-directory: terraform
+        working-directory: scm/terraform
         run: terraform apply -auto-approve
 
       - name: Terraform destroy
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.terraform_action == 'destroy' }}
-        working-directory: terraform
+        working-directory: scm/terraform
         run: terraform destroy -auto-approve
-

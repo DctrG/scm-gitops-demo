@@ -1,0 +1,9 @@
+# Palo Alto Networks Panorama Credentials
+# Copy this file to terraform.tfvars and fill in your actual credentials
+# DO NOT commit terraform.tfvars to git - it contains sensitive information
+
+panorama_hostname = "panorama.example.com"
+panorama_api_key  = "your-panorama-api-key"
+
+# Path to customers YAML file (optional, defaults to customers.yaml)
+# customers_file = "customers.yaml"

@@ -1,0 +1,63 @@
+name: Panorama VPN (Python)
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'panorama/customers-to-add.yaml'
+      - 'panorama/customers-to-delete.yaml'
+      - 'panorama/deploy-multi-vpn.py'
+      - 'requirements.txt'
+      - '.github/workflows/panorama-python.yml'
+
+  push:
+    branches:
+      - main
+    paths:
+      - 'panorama/customers-to-add.yaml'
+      - 'panorama/customers-to-delete.yaml'
+      - 'panorama/deploy-multi-vpn.py'
+      - 'requirements.txt'
+      - '.github/workflows/panorama-python.yml'
+
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Panorama Python VPN Automation
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+
+      - name: Validate customer YAML
+        working-directory: panorama
+        run: |
+          python - <<'PY'
+          import yaml
+
+          for filename in ("customers-to-add.yaml", "customers-to-delete.yaml"):
+              with open(filename, "r", encoding="utf-8") as fh:
+                  yaml.safe_load(fh)
+              print(f"Validated {filename}")
+          PY
+
+      - name: Deploy Panorama Python-managed VPNs
+        if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+        working-directory: panorama
+        env:
+          PANORAMA_HOST: ${{ secrets.PANORAMA_HOST }}
+          PANORAMA_API_KEY: ${{ secrets.PANORAMA_API_KEY }}
+        run: python deploy-multi-vpn.py

@@ -1,0 +1,96 @@
+name: Panorama VPN (Terraform)
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'panorama/customers-terraform.yaml'
+      - 'panorama/terraform/**'
+      - '.github/workflows/panorama-terraform.yml'
+
+  push:
+    branches:
+      - main
+    paths:
+      - 'panorama/customers-terraform.yaml'
+      - 'panorama/terraform/**'
+      - '.github/workflows/panorama-terraform.yml'
+
+  workflow_dispatch:
+    inputs:
+      terraform_action:
+        description: 'Terraform action'
+        required: true
+        default: 'plan'
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
+
+jobs:
+  deploy:
+    name: Panorama Terraform VPN Automation
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    env:
+      TF_PLUGIN_CACHE_DIR: /tmp/terraform-plugin-cache
+      PANOS_HOSTNAME: ${{ secrets.PANORAMA_HOST }}
+      PANOS_API_KEY: ${{ secrets.PANORAMA_API_KEY }}
+      TF_VAR_panorama_hostname: ${{ secrets.PANORAMA_HOST }}
+      TF_VAR_panorama_api_key: ${{ secrets.PANORAMA_API_KEY }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Prepare Terraform customer file
+        run: cp panorama/customers-terraform.yaml panorama/terraform/customers.yaml
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.11.4"
+          terraform_wrapper: false
+          cli_config_credentials_token: ${{ secrets.TF_TOKEN_APP_TERRAFORM_IO }}
+
+      - name: Cache Terraform providers
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.TF_PLUGIN_CACHE_DIR }}
+          key: terraform-providers-panorama-${{ runner.os }}-${{ hashFiles('panorama/terraform/versions.tf') }}
+          restore-keys: |
+            terraform-providers-panorama-${{ runner.os }}-
+
+      - name: Create Terraform plugin cache directory
+        run: mkdir -p "$TF_PLUGIN_CACHE_DIR"
+
+      - name: Terraform fmt
+        working-directory: panorama/terraform
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init
+        working-directory: panorama/terraform
+        run: terraform init
+
+      - name: Terraform validate
+        working-directory: panorama/terraform
+        run: terraform validate
+
+      - name: Terraform plan
+        if: ${{ github.event_name == 'pull_request' || inputs.terraform_action == 'plan' }}
+        working-directory: panorama/terraform
+        run: terraform plan
+
+      - name: Terraform apply
+        if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.terraform_action == 'apply') }}
+        working-directory: panorama/terraform
+        run: terraform apply -auto-approve
+
+      - name: Terraform destroy
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.terraform_action == 'destroy' }}
+        working-directory: panorama/terraform
+        run: terraform destroy -auto-approve
