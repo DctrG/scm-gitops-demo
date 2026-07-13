@@ -16,17 +16,17 @@ global:
 
 # Customer configurations
 customers:
-  - customer_name: "Customer-AB"
-    device_group: "PANW-Python-Customer-AB"
-    customer_network: "10.24.0.0/16"
-    customer_network_object: "customer-AB-Net"
-    peer_ip: "203.0.113.20"
-    psk: "replace-with-real-psk"
-    tunnel_number: 11
-    zone_name: "Customer-AB-Zone"
-    ike_gateway_name: "Customer-AB-IKE-GW"
-    ipsec_tunnel_name: "Customer-AB-Tunnel"
-    security_rule_name: "allow-customer-ab-to-panw-python"
+  # - customer_name: "Customer-AB"
+  #   device_group: "PANW-Python-Customer-AB"
+  #   customer_network: "10.24.0.0/16"
+  #   customer_network_object: "customer-AB-Net"
+  #   peer_ip: "203.0.113.20"
+  #   psk: "replace-with-real-psk"
+  #   tunnel_number: 11
+  #   zone_name: "Customer-AB-Zone"
+  #   ike_gateway_name: "Customer-AB-IKE-GW"
+  #   ipsec_tunnel_name: "Customer-AB-Tunnel"
+  #   security_rule_name: "allow-customer-ab-to-panw-python"
 
   # - customer_name: "Customer-CD"
   #   device_group: "PANW-Python-Customer-CD"

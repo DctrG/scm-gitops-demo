@@ -7,7 +7,7 @@
 
 device_groups_to_delete:
   # Example (commented out):
-  # - "PANW-Python-Customer-AB"
+  - "PANW-Python-Customer-AB"
   # - "PANW-Python-Customer-CD"
   # - "PANW-Python-Customer-EF"
   # - "PANW-Python-Customer-GH"

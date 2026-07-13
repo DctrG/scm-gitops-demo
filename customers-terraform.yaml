@@ -19,18 +19,18 @@ global:
 # Removing a customer from this list will delete it (via Terraform destroy)
 # Set enabled: false to disable without deleting
 customers:
-  - customer_name: "Customer-AB"
-    device_group: "PANW-Terraform-Customer-AB"
-    customer_network: "10.24.0.0/16"
-    customer_network_object: "customer-AB-Net"
-    peer_ip: "203.0.113.20"
-    psk: "replace-with-real-psk"
-    tunnel_number: 11
-    zone_name: "Customer-AB-Zone"
-    ike_gateway_name: "Customer-AB-IKE-GW"
-    ipsec_tunnel_name: "Customer-AB-Tunnel"
-    security_rule_name: "allow-customer-ab-to-panw-terraform"
-    enabled: true
+  # - customer_name: "Customer-AB"
+  #   device_group: "PANW-Terraform-Customer-AB"
+  #   customer_network: "10.24.0.0/16"
+  #   customer_network_object: "customer-AB-Net"
+  #   peer_ip: "203.0.113.20"
+  #   psk: "replace-with-real-psk"
+  #   tunnel_number: 11
+  #   zone_name: "Customer-AB-Zone"
+  #   ike_gateway_name: "Customer-AB-IKE-GW"
+  #   ipsec_tunnel_name: "Customer-AB-Tunnel"
+  #   security_rule_name: "allow-customer-ab-to-panw-terraform"
+  #   enabled: true
 
   # - customer_name: "Customer-CD"
   #   device_group: "PANW-Terraform-Customer-CD"
