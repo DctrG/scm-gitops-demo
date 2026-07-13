@@ -143,10 +143,10 @@ def commit(description: str) -> None:
     for _ in range(90):
         time.sleep(5)
         jr = api_request({"type": "op", "cmd": f"<show><jobs><id>{job_id}</id></jobs></show>"})
-        status = jr.findtext(".//status")
-        progress = jr.findtext(".//progress")
+        status = jr.findtext(".//job/status")
+        progress = jr.findtext(".//job/progress")
         if status == "FIN":
-            result = jr.findtext(".//result")
+            result = jr.findtext(".//job/result")
             if result == "OK":
                 print(f"  ✓ Commit job {job_id} completed successfully")
                 return
