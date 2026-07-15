@@ -32,6 +32,7 @@ customers:
     security_rule_name: "allow-customer-ab-to-panw-terraform"
     enabled: true
 
+
   # - customer_name: "Customer-CD"
   #   device_group: "PANW-Terraform-Customer-CD"
   #   customer_network: "10.25.0.0/16"
